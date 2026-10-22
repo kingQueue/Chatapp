@@ -23,13 +23,16 @@ class CharacterRoomTests(unittest.TestCase):
         app.initialize()
         self.payloads = []
         self.fail = False
+        self.fail_on = None
+        self.available = ['qwen3:8b', 'specialist:local']
+        self.reply_text = 'A distinctive reply.'
         def fake_open(req, timeout=None):
             if isinstance(req, str) and req.endswith('/api/tags'):
-                return io.BytesIO(json.dumps({'models':[{'name':'qwen3:8b'},{'name':'private-cloud'}]}).encode())
+                return io.BytesIO(json.dumps({'models':[{'name':name} for name in self.available + ['private-cloud']]}).encode())
             self.payloads.append(json.loads(req.data))
-            if self.fail:
+            if self.fail or len(self.payloads) == self.fail_on:
                 raise urllib.error.URLError('offline')
-            return io.BytesIO(b'{"message":{"content":"A distinctive "}}\n{"message":{"content":"reply."},"done":true}\n')
+            return io.BytesIO((json.dumps({'message':{'content':self.reply_text},'done':True})+'\n').encode())
         app.urlopen = fake_open
         self.server = app.ThreadingHTTPServer(('127.0.0.1',0),app.Handler)
         self.server.daemon_threads = True
@@ -106,7 +109,7 @@ class CharacterRoomTests(unittest.TestCase):
         self.assertEqual(export['format'],'character-room-v1')
         self.assertEqual(export['chats'][0]['id'],chat_id)
         self.assertEqual(len(export['messages']),1)
-        self.assertEqual(self.request('/api/models')['models'],['qwen3:8b'])
+        self.assertEqual(self.request('/api/models')['models'],['qwen3:8b','specialist:local'])
 
     def test_separate_conversations_and_renaming(self):
         c,first=self.chat()
@@ -200,6 +203,86 @@ class CharacterRoomTests(unittest.TestCase):
             finally:
                 app.set_network(False,persist=False)
             with self.assertRaises(ValueError):app.set_network(True,persist=False,address='0.0.0.0')
+
+    def team(self):
+        characters=self.request('/api/state')['characters'][:2]
+        second=dict(characters[1]);second.update(model='specialist:local',specialty='Review plans for missing requirements.')
+        self.request('/api/characters/'+second['id'],second)
+        chat_id=self.request('/api/groups',{'title':'Project team','memory':'Design a small garden. Budget: 200 dollars.','member_ids':[c['id'] for c in characters]})['id']
+        return characters,chat_id
+
+    def test_character_model_override_and_default(self):
+        c,chat_id=self.chat();data=dict(c);data.update(model='specialist:local',specialty='Find practical solutions.')
+        self.request('/api/characters/'+c['id'],data)
+        self.request('/api/chats/'+chat_id+'/reply',{'message':'Help me plan'})
+        self.assertEqual(self.payloads[-1]['model'],'specialist:local')
+        self.assertIn('Find practical solutions.',self.payloads[-1]['messages'][0]['content'])
+        data.update(model='');self.request('/api/characters/'+c['id'],data)
+        self.request('/api/chats/'+chat_id+'/reply',{'message':'And now?'})
+        self.assertEqual(self.payloads[-1]['model'],'qwen3:8b')
+
+    def test_group_uses_each_model_and_shares_previous_contributions(self):
+        people,chat_id=self.team()
+        events=self.request('/api/chats/'+chat_id+'/reply',{'message':'Make a concrete plan together.'})
+        self.assertEqual(events[-1]['type'],'done')
+        self.assertEqual([p['model'] for p in self.payloads],['qwen3:8b','specialist:local'])
+        self.assertIn('Budget: 200 dollars',self.payloads[1]['messages'][0]['content'])
+        self.assertIn('Review plans for missing requirements.',self.payloads[1]['messages'][0]['content'])
+        self.assertTrue(any(people[0]['name'] in m['content'] and 'A distinctive reply.' in m['content'] for m in self.payloads[1]['messages'][1:]))
+        saved=self.request('/api/chats/'+chat_id)
+        self.assertEqual(saved['kind'],'group')
+        self.assertEqual(saved['pending_round'],'')
+        self.assertEqual([m['character_id'] for m in saved['messages'][1:]],[c['id'] for c in people])
+        self.assertEqual([m['model'] for m in saved['messages'][1:]],['qwen3:8b','specialist:local'])
+        self.assertEqual(len(self.request('/api/export')['rounds']),1)
+
+    def test_group_retry_resumes_after_completed_member_without_duplicates(self):
+        people,chat_id=self.team();self.fail_on=2
+        events=self.request('/api/chats/'+chat_id+'/reply',{'message':'Start the task.'})
+        self.assertEqual(events[-1]['type'],'error')
+        saved=self.request('/api/chats/'+chat_id)
+        self.assertNotEqual(saved['pending_round'],'')
+        self.assertEqual(len(saved['messages']),2)
+        with self.assertRaises(urllib.error.HTTPError):self.request('/api/chats/'+chat_id+'/reply',{'message':'A conflicting task'})
+        app.initialize();self.fail_on=None
+        events=self.request('/api/chats/'+chat_id+'/reply',{'message':''})
+        self.assertEqual(events[-1]['type'],'done')
+        self.assertEqual(self.payloads[-1]['model'],'specialist:local')
+        saved=self.request('/api/chats/'+chat_id)
+        self.assertEqual(len(saved['messages']),3)
+        self.assertEqual(len([m for m in saved['messages'] if m['role']=='user']),1)
+        self.assertEqual(len([m for m in saved['messages'] if m['character_id']==people[0]['id']]),1)
+        self.assertEqual(saved['pending_round'],'')
+
+    def test_group_validation_and_character_deletion_protection(self):
+        people,chat_id=self.team()
+        for ids in [[],[people[0]['id']],[people[0]['id']]*2,['missing',people[0]['id']]]:
+            with self.assertRaises(urllib.error.HTTPError):self.request('/api/groups',{'title':'Bad team','member_ids':ids})
+        with self.assertRaises(urllib.error.HTTPError) as ctx:self.request('/api/characters/'+people[1]['id'],{'delete':True})
+        self.assertEqual(ctx.exception.code,400)
+        self.assertEqual(self.request('/api/chats/'+chat_id)['member_ids'],[c['id'] for c in people])
+        self.request('/api/chats/'+chat_id,{'delete':True})
+        self.request('/api/characters/'+people[1]['id'],{'delete':True})
+
+    def test_missing_member_model_keeps_progress_and_allows_reassignment(self):
+        people,chat_id=self.team();self.available=['qwen3:8b']
+        events=self.request('/api/chats/'+chat_id+'/reply',{'message':'Start a plan.'})
+        self.assertEqual(events[-1]['type'],'error')
+        self.assertIn('specialist:local',events[-1]['error'])
+        self.assertEqual(len(self.payloads),1)
+        c=next(c for c in self.request('/api/state')['characters'] if c['id']==people[1]['id'])
+        c['model']='';self.request('/api/characters/'+c['id'],c)
+        events=self.request('/api/chats/'+chat_id+'/reply',{'message':''})
+        self.assertEqual(events[-1]['type'],'done')
+        self.assertEqual(len(self.request('/api/chats/'+chat_id)['messages']),3)
+
+    def test_long_group_round_keeps_current_user_task_in_context(self):
+        people=self.request('/api/state')['characters'][:3]
+        chat_id=self.request('/api/groups',{'title':'Long round','member_ids':[c['id'] for c in people]})['id']
+        self.reply_text='Detailed contribution. '*450
+        task='The active task must remain visible to every participant.'
+        self.request('/api/chats/'+chat_id+'/reply',{'message':task})
+        self.assertTrue(any(m['content']==task for m in self.payloads[-1]['messages'][1:]))
 
 if __name__=='__main__':unittest.main(verbosity=2)
 

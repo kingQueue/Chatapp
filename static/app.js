@@ -1,6 +1,6 @@
 'use strict';
 const $ = id => document.getElementById(id);
-let state = {characters: [], chats: [], settings: {}}, activeChat = null, editingId = null, busy = false, toastTimer, editorImage='', imageLoading=false, imageSequence=0, networkEnabled=false;
+let state = {characters: [], chats: [], settings: {}}, activeChat = null, editingId = null, busy = false, toastTimer, editorImage='', imageLoading=false, imageSequence=0, networkEnabled=false, selectedGroup=[], modelLoadSequence=0;
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const imageMarkup = c => c.image_data?.startsWith('data:image/jpeg;base64,') ? `<img src="${esc(c.image_data)}" alt="">` : esc(c.avatar);
 const avatar = (c, size='') => `<div class="avatar ${esc(c.color)} ${size}" aria-hidden="true">${imageMarkup(c)}</div>`;
@@ -23,21 +23,32 @@ async function api(path, data) {
 function canLeave() { if (busy) { toast('Let the character finish replying first.'); return false; } return true; }
 async function loadState() { state = await api('/api/state'); renderLibrary(); renderRecent(); }
 function currentCharacter() { return state.characters.find(c => c.id === activeChat?.character_id); }
+function chatIdentity(chat=activeChat){
+  if(chat?.kind==='group')return {name:chat.title,subtitle:(chat.member_ids||[]).map(id=>state.characters.find(c=>c.id===id)?.name||'Character').join(' · '),avatar:'◉',color:'blue',tags:[]};
+  return state.characters.find(c=>c.id===chat?.character_id);
+}
+function messageCharacter(message){return state.characters.find(c=>c.id===message.character_id)||{...(currentCharacter()||{}),name:message.speaker_name||currentCharacter()?.name||'Character'};}
+function groupProfile(){return `<div class="group-profile-intro"><div class="avatar blue">◉</div><h2>Your team</h2><p class="subtitle">Each member builds on the shared conversation.</p></div>`+activeChat.member_ids.map((id,index)=>{const c=state.characters.find(c=>c.id===id);return c?`<section class="group-member">${avatar(c,'small')}<div><h3>${index+1}. ${esc(c.name)}</h3><p class="model-badge">${esc(c.model||state.settings.model)}${c.model?'':' · default'}</p><p class="help">${esc(c.specialty||c.subtitle)}</p><button class="text-button" data-member-edit="${c.id}">Edit ${esc(c.name)}</button></div></section>`:'';}).join('');}
+
 function renderLibrary() {
   $('character-count').textContent = state.characters.length;
   $('collection-count').textContent = state.characters.length;
   const query = $('search').value.toLowerCase().trim();
   const characters = state.characters.filter(c => [c.name,c.subtitle,...c.tags].join(' ').toLowerCase().includes(query));
-  $('character-grid').innerHTML = characters.map(c => `<article class="character-card ${esc(c.color)}"><div class="card-art">${avatar(c)}</div><div class="card-body"><div class="card-title"><h3>${esc(c.name)}</h3><button class="card-edit" data-edit="${c.id}" aria-label="Edit ${esc(c.name)}">✎</button></div><p class="card-subtitle">${esc(c.subtitle || 'A story waiting to happen')}</p><div class="tags">${tags(c)}</div><p class="card-description">${esc(c.background)}</p><button class="card-chat" data-chat="${c.id}"><span>${state.chats.some(chat => chat.character_id === c.id) ? 'Continue conversation' : 'Start a conversation'}</span><span>↗</span></button></div></article>`).join('') + `<button class="create-card" id="grid-create"><span>＋</span><strong>${query && !characters.length ? 'No matches. Create someone new?' : 'Someone only you can imagine'}</strong><small>Give them a story.<br>Let the conversation begin.</small></button>`;
+  $('character-grid').innerHTML = characters.map(c => `<article class="character-card ${esc(c.color)}"><div class="card-art">${avatar(c)}</div><div class="card-body"><div class="card-title"><h3>${esc(c.name)}</h3><button class="card-edit" data-edit="${c.id}" aria-label="Edit ${esc(c.name)}">✎</button></div><p class="card-subtitle">${esc(c.subtitle || 'A story waiting to happen')}</p><div class="tags">${tags(c)}</div><p class="card-description">${esc(c.background)}</p><button class="card-chat" data-chat="${c.id}"><span>${state.chats.some(chat => chat.kind!=='group' && chat.character_id === c.id) ? 'Continue conversation' : 'Start a conversation'}</span><span>↗</span></button></div></article>`).join('') + `<button class="create-card" id="grid-create"><span>＋</span><strong>${query && !characters.length ? 'No matches. Create someone new?' : 'Someone only you can imagine'}</strong><small>Give them a story.<br>Let the conversation begin.</small></button>`;
   document.querySelectorAll('[data-edit]').forEach(b => b.onclick = () => openEditor(b.dataset.edit));
   document.querySelectorAll('[data-chat]').forEach(b => b.onclick = action(() => openCharacter(b.dataset.chat)));
   $('grid-create').onclick = () => openEditor();
+  const groups=state.chats.filter(chat=>chat.kind==='group');$('saved-groups').hidden=!groups.length;
+  $('group-list').innerHTML=groups.map(chat=>`<button class="saved-group" data-open-group="${chat.id}"><span class="avatar blue tiny">◉</span><span><strong>${esc(chat.title)}</strong><small>${esc(chatIdentity(chat).subtitle)}${chat.pending_round?' · unfinished round':''}</small></span><span>↗</span></button>`).join('');
+  document.querySelectorAll('[data-open-group]').forEach(button=>button.onclick=action(()=>openChat(button.dataset.openGroup)));
+
 }
 function renderRecent() {
   const chats = state.chats.slice(0,30);
   $('recent-list').innerHTML = chats.length ? chats.map(chat => {
-    const c = state.characters.find(c => c.id === chat.character_id);
-    return c ? `<button class="recent-item ${activeChat?.id === chat.id ? 'selected' : ''}" data-recent="${chat.id}">${avatar(c,'tiny')}<span class="recent-copy"><strong>${esc(c.name)}</strong><small>${esc(chat.title)}</small></span></button>` : '';
+    const c = chatIdentity(chat);
+    return c ? `<button class="recent-item ${activeChat?.id === chat.id ? 'selected' : ''}" data-recent="${chat.id}">${avatar(c,'tiny')}<span class="recent-copy"><strong>${esc(c.name)}</strong><small>${esc(chat.kind==='group' ? c.subtitle : chat.title)}</small></span></button>` : '';
   }).join('') : '<p class="empty-recent">Your conversations will find a home here.</p>';
   document.querySelectorAll('[data-recent]').forEach(b => b.onclick = action(() => openChat(b.dataset.recent)));
 }
@@ -51,7 +62,7 @@ function showLibrary() {
 }
 async function openCharacter(id, forceNew=false) {
   if (!canLeave()) return;
-  const latest = state.chats.find(c => c.character_id === id);
+  const latest = state.chats.find(c => c.kind!=='group' && c.character_id === id);
   const chatId = !forceNew && latest ? latest.id : (await api('/api/chats', {character_id:id})).id;
   await loadState();
   await openChat(chatId);
@@ -66,43 +77,52 @@ async function openChat(id) {
   $('message-input').focus();
 }
 function renderChat() {
-  const c = currentCharacter(); if (!c) return showLibrary();
+  const c = chatIdentity(); if (!c) return showLibrary();
+  const group=activeChat.kind==='group';
   $('chat-name').textContent = c.name; $('chat-subtitle').textContent = c.subtitle;
   $('chat-title').textContent = activeChat.title;
   $('chat-avatar').className = 'avatar small ' + c.color; $('chat-avatar').innerHTML = imageMarkup(c);
-  $('mobile-chat-picker').innerHTML=state.chats.map(chat=>`<option value="${chat.id}">${esc(state.characters.find(person=>person.id===chat.character_id)?.name)} · ${esc(chat.title)}</option>`).join('');
+  $('mobile-chat-picker').innerHTML=state.chats.map(chat=>`<option value="${chat.id}">${esc(chatIdentity(chat)?.name)} · ${esc(chat.title)}</option>`).join('');
   $('mobile-chat-picker').value=activeChat.id;
-  $('message-input').placeholder = `Message ${c.name}…`;
-  $('profile-content').innerHTML = `${avatar(c)}<h2>${esc(c.name)}</h2><p class="subtitle">${esc(c.subtitle)}</p><div class="tags">${tags(c)}</div><h3>Their story</h3><p class="bio">${esc(c.background)}</p>${c.style ? `<h3>Their voice</h3><p class="bio">${esc(c.style)}</p>` : ''}${c.scenario ? `<h3>The scene</h3><p class="bio">${esc(c.scenario)}</p>` : ''}`;
+  $('message-input').placeholder = group?'Give the team a task or respond…':`Message ${c.name}…`;
+  $('profile-button').textContent=group?'Team details':'Character details';
+  $('edit-character').hidden=group;
+  $('continue-group').hidden=!group;
+  $('continue-group').textContent=activeChat.messages.some(m=>m.role==='user')?'↻ Continue round':'▶ Start round';
+  $('continue-group').disabled=!!activeChat.pending_round;
+  $('memory-label').textContent=group?'Shared task & memory':'Pinned memory';
+  $('memory-help').textContent=group?'Goals, requirements, and facts every member sees on each turn.':'Facts and preferences this character should always remember in this conversation.';
+  $('profile-content').innerHTML = group ? groupProfile() : `${avatar(c)}<h2>${esc(c.name)}</h2><p class="subtitle">${esc(c.subtitle)}</p><div class="tags">${tags(c)}</div><h3>Their story</h3><p class="bio">${esc(c.background)}</p><p class="model-badge">${esc(c.model||state.settings.model)}${c.model?'':' · default'}</p>${c.specialty?`<h3>Task specialty</h3><p class="bio">${esc(c.specialty)}</p>`:''}${c.style ? `<h3>Their voice</h3><p class="bio">${esc(c.style)}</p>` : ''}${c.scenario ? `<h3>The scene</h3><p class="bio">${esc(c.scenario)}</p>` : ''}`;
+  document.querySelectorAll('[data-member-edit]').forEach(b=>b.onclick=()=>openEditor(b.dataset.memberEdit));
   $('memory-input').value = activeChat.memory;
   renderMessages();
-  const unanswered = activeChat.messages.at(-1)?.role === 'user';
+  const unanswered = !!activeChat.pending_round || activeChat.messages.at(-1)?.role === 'user';
   $('reply-error').hidden = !unanswered;
-  $('reply-error-text').textContent = unanswered ? 'Your last message is saved and waiting for a reply.' : '';
+  $('reply-error-text').textContent = unanswered ? (group?'This round is unfinished. Retry to continue with the next character; saved contributions are kept.':'Your last message is saved and waiting for a reply.') : '';
   $('message-input').disabled = unanswered;
   $('send-button').disabled = unanswered;
 }
 function formatMessage(text) { return esc(text).replace(/\*([^*\n]+)\*/g, '<em>$1</em>'); }
 function messageHTML(message, index) {
-  const c = currentCharacter(), user = message.role === 'user';
-  return `<div class="message ${user ? 'user' : ''}">${user ? '' : avatar(c,'tiny')}<div class="message-body"><p class="message-label">${user ? 'You' : esc(c.name)}</p><div class="message-text">${formatMessage(message.content)}</div>${user ? '' : `<button class="text-button read-aloud" data-read="${index}" aria-label="Read reply ${index+1} aloud">▷ Read aloud</button>`}</div></div>`;
+  const c = messageCharacter(message), user = message.role === 'user';
+  return `<div class="message ${user ? 'user' : ''}">${user ? '' : avatar(c,'tiny')}<div class="message-body"><p class="message-label">${user ? 'You' : esc(message.speaker_name||c.name)}${!user&&message.model?`<span class="message-model">${esc(message.model)}</span>`:''}</p><div class="message-text">${formatMessage(message.content)}</div>${user ? '' : `<button class="text-button read-aloud" data-read="${index}" aria-label="Read reply ${index+1} aloud">▷ Read aloud</button>`}</div></div>`;
 }
-function renderMessages() { $('messages').innerHTML = activeChat.messages.map(messageHTML).join(''); document.querySelectorAll('[data-read]').forEach(button=>button.onclick=action(()=>speech.speak(activeChat.messages[Number(button.dataset.read)].content,currentCharacter()))); scrollMessages(); }
+function renderMessages() { $('messages').innerHTML = activeChat.messages.map(messageHTML).join(''); document.querySelectorAll('[data-read]').forEach(button=>button.onclick=action(()=>speech.speak(activeChat.messages[Number(button.dataset.read)].content,messageCharacter(activeChat.messages[Number(button.dataset.read)])))); scrollMessages(); }
 function scrollMessages() { $('messages').scrollTop = $('messages').scrollHeight; }
-async function sendMessage(retry=false) {
+async function sendMessage(retry=false, override=null) {
   if (busy || !activeChat) return;
-  const text = retry ? '' : $('message-input').value.trim();
+  const text = retry ? '' : override ?? $('message-input').value.trim();
   if (!retry && !text) return;
   const chatId = activeChat.id;
   speech.stop();
   busy = true;
   $('send-button').disabled = true; $('message-input').disabled = true; $('retry-button').disabled = true;
   $('reply-error').hidden = true;
-  if (!retry) { activeChat.messages.push({role:'user',content:text}); $('message-input').value=''; renderMessages(); }
-  const pending = document.createElement('div'); pending.className='message';
-  pending.innerHTML = `${avatar(currentCharacter(),'tiny')}<div class="message-body"><p class="message-label">${esc(currentCharacter().name)}</p><div class="message-text waiting">Thinking of a reply… The first response may take a moment.</div></div>`;
+  if (!retry) { activeChat.messages.push({role:'user',content:text}); if(override===null)$('message-input').value=''; renderMessages(); }
+  let pending = document.createElement('div'); pending.className='message';
+  pending.innerHTML = `${avatar(chatIdentity(),'tiny')}<div class="message-body"><p class="message-label">${esc(chatIdentity().name)}</p><div class="message-text waiting">Thinking of a reply… The first response may take a moment.</div></div>`;
   $('messages').append(pending); scrollMessages();
-  let error = null, complete = false, reply = '';
+  let error = null, complete = false, reply = '', completedTurns=[];
   try {
     const response = await fetch(`/api/chats/${chatId}/reply`, {method:'POST',headers:{'Content-Type':'application/json','X-Character-Room':'1'},body:JSON.stringify({message:text})});
     if (!response.ok) { const data = await response.json(); throw new Error(data.error); }
@@ -110,6 +130,12 @@ async function sendMessage(retry=false) {
     function consume(line) {
       if (!line.trim()) return;
       const event = JSON.parse(line);
+      if(event.type==='speaker'){
+        if(!pending){pending=document.createElement('div');pending.className='message';$('messages').append(pending);}
+        reply='';const c=state.characters.find(c=>c.id===event.character_id)||chatIdentity();
+        pending.innerHTML=`${avatar(c,'tiny')}<div class="message-body"><p class="message-label">${esc(event.speaker_name)} <span class="message-model">${esc(event.model)} · ${event.position}/${event.total}</span></p><div class="message-text waiting">Preparing a contribution…</div></div>`;scrollMessages();
+      }
+      if(event.type==='turn_done'){completedTurns.push(event.message_id);pending=null;}
       if (event.type === 'token') { reply += event.text; const el = pending.querySelector('.message-text'); el.classList.remove('waiting'); el.innerHTML = formatMessage(reply); scrollMessages(); }
       if (event.type === 'error') error = event.error;
       if (event.type === 'done') complete = true;
@@ -121,10 +147,10 @@ async function sendMessage(retry=false) {
   finally {
     busy = false; $('retry-button').disabled = false;
     try { await loadState(); activeChat = await api('/api/chats/' + chatId); renderChat(); renderRecent(); }
-    catch (e) { pending.remove(); if (!retry) $('message-input').value=text; toast('Could not refresh saved history. Reload after restarting the app.'); }
+    catch (e) { pending?.remove(); if (!retry) $('message-input').value=text; toast('Could not refresh saved history. Reload after restarting the app.'); }
     if (error) { $('reply-error').hidden = false; $('reply-error-text').textContent=error; }
     if (!$('message-input').disabled) $('message-input').focus();
-    if(complete&&!error&&currentCharacter()?.auto_read){try{speech.speak(activeChat.messages.at(-1).content,currentCharacter());}catch(e){toast(e.message);}}
+    if(complete&&!error){const entries=activeChat.messages.filter(m=>completedTurns.includes(m.id)&&messageCharacter(m).auto_read).map(m=>({text:m.content,character:messageCharacter(m)}));if(entries.length)speech.speakSequence(entries);}
   }
 }
 function openEditor(id=null) {
@@ -140,6 +166,8 @@ function openEditor(id=null) {
   $('speech-rate').value=c?.speech_rate||1; $('speech-rate-value').textContent=Number($('speech-rate').value).toFixed(2)+'×';
   $('auto-read').checked=!!c?.auto_read;
   populateVoices(c?.voice_uri||'');
+  $('character-form').elements.namedItem('specialty').value=c?.specialty||'';
+  loadCharacterModels(c?.model||'');
   $('character-dialog').showModal();
 }
 async function saveCharacter(event) {
@@ -172,6 +200,41 @@ async function refreshModels() {
 function download(name, contents, mime) {
   const url=URL.createObjectURL(new Blob([contents],{type:mime}));const a=document.createElement('a');a.href=url;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(url),10000);
 }
+async function loadCharacterModels(selected=$('character-model').value){
+  const sequence=++modelLoadSequence;
+  $('character-model').innerHTML=`<option value="">Use app default (${esc(state.settings.model)})</option>${selected?`<option value="${esc(selected)}">${esc(selected)}</option>`:''}`;
+  $('character-model').value=selected;$('character-model-status').textContent='Checking downloaded models…';
+  try{
+    const result=await api('/api/models');if(sequence!==modelLoadSequence)return;
+    const value=$('character-model').value;
+    $('character-model').innerHTML=`<option value="">Use app default (${esc(state.settings.model)})</option>`+result.models.map(model=>`<option value="${esc(model)}">${esc(model)}</option>`).join('');
+    if(value&&!result.models.includes(value))$('character-model').insertAdjacentHTML('beforeend',`<option value="${esc(value)}">${esc(value)} · currently unavailable</option>`);
+    $('character-model').value=value;
+    $('character-model-status').textContent=result.error||`${result.models.length} local models available. Your choice is saved per character.`;
+  }catch(e){if(sequence===modelLoadSequence)$('character-model-status').textContent=e.message;}
+}
+function openGroupEditor(ids=[], title='', memory=''){
+  if(!canLeave())return;speech.stop();selectedGroup=ids.slice();$('group-form').reset();
+  $('group-form').elements.namedItem('title').value=title;
+  $('group-form').elements.namedItem('memory').value=memory;
+  renderGroupChoices();$('group-dialog').showModal();
+}
+function renderGroupChoices(){
+  $('group-options').innerHTML=state.characters.map(c=>`<label class="group-choice"><input type="checkbox" data-group-member="${c.id}" ${selectedGroup.includes(c.id)?'checked':''}>${avatar(c,'tiny')}<span><strong>${esc(c.name)}</strong><small>${esc(c.model||state.settings.model)} · ${esc(c.specialty||c.subtitle)}</small></span></label>`).join('');
+  document.querySelectorAll('[data-group-member]').forEach(input=>input.onchange=()=>{if(input.checked){if(selectedGroup.length>=6){input.checked=false;toast('Choose at most six characters.');return;}selectedGroup.push(input.dataset.groupMember);}else selectedGroup=selectedGroup.filter(id=>id!==input.dataset.groupMember);renderGroupChoices();});
+  $('group-order').innerHTML=selectedGroup.length?selectedGroup.map((id,index)=>{const c=state.characters.find(c=>c.id===id);return `<div class="group-order-row"><span>${index+1}. ${esc(c.name)}</span><button type="button" class="text-button" data-order="${index}" data-move="-1" aria-label="Move ${esc(c.name)} earlier" ${index===0?'disabled':''}>↑</button><button type="button" class="text-button" data-order="${index}" data-move="1" aria-label="Move ${esc(c.name)} later" ${index===selectedGroup.length-1?'disabled':''}>↓</button></div>`;}).join(''):'<p class="help">Select characters above. Put a reviewer or coordinator last to bring the work together.</p>';
+  document.querySelectorAll('[data-order]').forEach(button=>button.onclick=()=>{const a=Number(button.dataset.order),b=a+Number(button.dataset.move);[selectedGroup[a],selectedGroup[b]]=[selectedGroup[b],selectedGroup[a]];renderGroupChoices();});
+}
+$('group-nav').onclick=()=>openGroupEditor();$('group-button').onclick=()=>openGroupEditor();
+$('group-form').onsubmit=action(async event=>{
+  event.preventDefault();if(selectedGroup.length<2)throw new Error('Choose at least two characters.');
+  const button=event.submitter;button.disabled=true;
+  try{const data=Object.fromEntries(new FormData($('group-form')));data.member_ids=selectedGroup;
+    const result=await api('/api/groups',data);await loadState();$('group-dialog').close();await openChat(result.id);
+  }finally{button.disabled=false;}
+});
+$('refresh-character-models').onclick=()=>loadCharacterModels();
+$('continue-group').onclick=action(()=>sendMessage(false,activeChat.messages.some(m=>m.role==='user')?'Continue collaborating on the shared task. Build on the team’s previous contributions, resolve open questions, and improve the result.':'Work together on the shared task. Make concrete contributions using your individual specialties and build on each other’s ideas.'));
 function renderImagePreview(){ $('image-preview').innerHTML=editorImage ? `<img src="${esc(editorImage)}" alt="Character image preview">` : '<span>✧</span>'; $('remove-image').disabled=!editorImage; }
 async function chooseImage(){
   const file=$('character-image').files[0];if(!file)return;
@@ -230,18 +293,18 @@ $('character-form').onsubmit=action(saveCharacter);
 $('message-form').onsubmit=action(e=>{e.preventDefault();return sendMessage();});
 $('message-input').onkeydown=e=>{if(e.key==='Enter'&&!e.shiftKey&&!e.isComposing){e.preventDefault();action(()=>sendMessage())();}};
 $('retry-button').onclick=action(()=>sendMessage(true));
-$('new-chat').onclick=action(()=>openCharacter(activeChat.character_id,true));
+$('new-chat').onclick=action(()=>activeChat.kind==='group'?openGroupEditor(activeChat.member_ids,activeChat.title,activeChat.memory):openCharacter(activeChat.character_id,true));
 $('profile-button').onclick=()=>$('profile-panel').classList.toggle('visible');
 $('edit-character').onclick=()=>openEditor(activeChat.character_id);
 $('save-memory').onclick=action(async()=>{if(!canLeave())return;await api('/api/chats/'+activeChat.id,{memory:$('memory-input').value});activeChat.memory=$('memory-input').value;toast('Memory saved for this conversation.');});
 $('rename-chat').onclick=()=>{if(!canLeave())return;$('rename-input').value=activeChat.title;$('rename-dialog').showModal();};
 $('rename-form').onsubmit=action(async e=>{e.preventDefault();await api('/api/chats/'+activeChat.id,{title:$('rename-input').value});activeChat.title=$('rename-input').value;await loadState();renderChat();$('rename-dialog').close();});
 $('delete-chat').onclick=action(async()=>{if(!canLeave())return;if(!await confirmAction('Delete this conversation?','All messages and pinned memories in this conversation will be permanently deleted.'))return;await api('/api/chats/'+activeChat.id,{delete:true});showLibrary();await loadState();toast('Conversation deleted.');});
-$('delete-character').onclick=action(async()=>{if(!await confirmAction('Delete this character?', 'This also permanently deletes all conversations with this character. Export a backup first if you want to keep them.'))return;await api('/api/characters/'+editingId,{delete:true});$('character-dialog').close();if(activeChat?.character_id===editingId)showLibrary();await loadState();toast('Character deleted.');});
+$('delete-character').onclick=action(async()=>{if(!await confirmAction('Delete this character?', 'This deletes individual chats with this character. A character in a group cannot be deleted until its group conversations have been deleted. Export a backup first to keep your history.'))return;await api('/api/characters/'+editingId,{delete:true});$('character-dialog').close();if(activeChat?.character_id===editingId)showLibrary();await loadState();toast('Character deleted.');});
 $('settings-button').onclick=action(async()=>{$('settings-dialog').showModal();await Promise.all([refreshModels(),refreshNetwork()]);});
 $('refresh-models').onclick=action(refreshModels);
 $('save-model').onclick=action(async()=>{await api('/api/settings',{model:$('model-select').value});await loadState();toast('Local model selected.');await refreshModels();});
 $('backup-button').onclick=action(async()=>{download('character-room-backup.json',JSON.stringify(await api('/api/export'),null,2),'application/json');toast('Backup exported.');});
-$('export-chat').onclick=()=>{const c=currentCharacter();download(`${c.name.replace(/[^a-z0-9_-]/gi,'_')}-conversation.txt`,`${c.name} — ${activeChat.title}\n\nPinned memory: ${activeChat.memory || '(none)'}\n\n`+activeChat.messages.map(m=>`${m.role==='user'?'You':c.name}:\n${m.content}`).join('\n\n'),'text/plain;charset=utf-8');};
+$('export-chat').onclick=()=>{const c=chatIdentity();download(`${c.name.replace(/[^a-z0-9_-]/gi,'_')}-conversation.txt`,`${c.name} — ${activeChat.title}\n\nPinned memory: ${activeChat.memory || '(none)'}\n\n`+activeChat.messages.map(m=>`${m.role==='user'?'You':m.speaker_name||messageCharacter(m).name}${m.model?' ['+m.model+']':''}:\n${m.content}`).join('\n\n'),'text/plain;charset=utf-8');};
 window.addEventListener('beforeunload',e=>{if(busy){e.preventDefault();e.returnValue='';}});
 action(async()=>{await loadState();const saved=localStorage.getItem('character-room-active-chat');if(saved&&state.chats.some(c=>c.id===saved))await openChat(saved);}) ();

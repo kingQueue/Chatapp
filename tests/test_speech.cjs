@@ -23,4 +23,8 @@ const first=synth.queue[0];assert.ok(first.text.length<=220);first.onend();asser
 speech.stop();first.onend();assert.equal(synth.queue.length,0);assert.equal(speech.active,false);
 const empty=new context.RoomSpeech({...synth,getVoices:()=>[]},Utterance);
 assert.throws(()=>empty.speak('hello',{}),/No local voices/);
+speech.speakSequence([{text:'First contribution.',character:{name:'Mira'}},{text:'Second contribution.',character:{name:'Ash',speech_rate:1.3}}]);
+assert.equal(synth.queue[0].text,'First contribution.');
+synth.queue[0].onend();assert.equal(synth.queue[0].text,'Second contribution.');
+assert.equal(synth.queue[0].rate,1.3);synth.queue[0].onend();assert.equal(speech.active,false);
 console.log('Speech tests passed: local voices, replay, speed, chunking, pause/resume, cancellation, unavailable voices.');

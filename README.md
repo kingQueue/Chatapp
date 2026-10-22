@@ -14,6 +14,24 @@ Choose **Create character**. Add a name, a background story, and comma-separated
 
 **Start a conversation** opens a chat; **Continue conversation** resumes the most recent chat with that character. Use **New chat** for another independent conversation. The sidebar lets you return to earlier conversations. You can rename, export, or delete a conversation. Deleting a character also deletes its conversations, after confirmation.
 
+## Character models and specialties
+
+In **Edit character → Model & specialty**, choose any downloaded local Ollama chat model for that character. **Use app default** follows the model selected in Settings & backup. An explicit model choice overrides that default in both individual and group chats. Add an optional **Task specialty** (for example: planning, code review, creative drafting, or checking assumptions) to guide the character alongside their background, tags, and speaking style. A specialty describes their focus; the underlying model determines its capabilities.
+
+The dropdown refreshes from Ollama. It does not download models or connect to cloud providers. Model changes affect future replies; each new saved reply records the model actually used. If a chosen model is missing, select another model and retry the saved message or unfinished group round.
+
+## Group collaboration
+
+Choose **New group** or **Create a group**, give the team a name and a shared task, select **2–6 existing characters**, and arrange their speaking order. Put a reviewer or coordinator last if you want them to bring the contributions together. Groups appear in the library and recent conversations, including on a phone.
+
+Send a message, or use **Start round** to begin with the shared task. Each member contributes once, in order, through its own selected model. Later members receive earlier contributions labeled with the speaker’s name and ID. **Continue round** asks for another pass. Characters can propose plans, drafts, explanations, or analysis in chat; they cannot execute tools, browse the web, or modify files.
+
+**Team details** shows members, specialties, current models, and controls to edit each character. **Shared task & memory** is sent to every member. Recent context is bounded to about 16,000 characters, while the active user task is retained even in a long round. All messages stay saved locally. Each reply shows its character and actual model, and read-aloud uses that character’s voice. Automatic speech queues enabled characters’ contributions after the round finishes.
+
+Completed contributions are saved immediately. If a later member fails, **Retry reply** resumes the unfinished members without duplicating the user message or completed contributions, including after an app restart. New messages are blocked until the unfinished round is resumed or the conversation is deleted. Changing a missing model in the character editor allows the retry to proceed.
+
+Group membership and speaking order are fixed for each conversation. **New chat** lets you create another group using the same members and task as a starting point. Delete the old group if you no longer need it. A character belonging to a group cannot be deleted until those group conversations are deleted, so shared history cannot be accidentally removed by deleting one member. Character profile edits and model changes still apply to future turns.
+
 ## Images and read-aloud voices
 
 Open **Edit character** to choose a PNG, JPG, or WebP image (up to 10 MB). The app crops it to a square, resizes it to 512×512, and stores it in your local database. **Remove image** returns to the avatar symbol. Images are included in your local backups and never committed to this repository.
