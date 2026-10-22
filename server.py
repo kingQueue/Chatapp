@@ -1,0 +1,409 @@
+"""Character Room — local-only character chat. Python standard library only."""
+import argparse
+import json
+import os
+from pathlib import Path
+import shutil
+import sqlite3
+import subprocess
+import threading
+import time
+import uuid
+import webbrowser
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
+
+ROOT = Path(__file__).resolve().parent
+DB_PATH = ROOT / 'data' / 'character-room.sqlite3'
+OLLAMA = 'http://127.0.0.1:11434'
+LOCKS = {}
+LOCK_GUARD = threading.Lock()
+DEFAULTS = [
+    dict(name='Mira', subtitle='The midnight bookshop keeper', avatar='☾', color='plum', tags=['warm', 'witty', 'bookish'], background='Mira is 28 and owns a tiny bookshop that opens only after sunset. She grew up above her grandmother’s bookstore and believes every person has a book they need before they know it. She is observant, quietly playful, and fond of rain, handwritten notes, and terrible literary puns. She sometimes hides her own loneliness behind caring for others.', style='Gentle, perceptive, lightly teasing. Use vivid but brief descriptions and occasional dry humor. Ask thoughtful questions without sounding like a therapist.', scenario='It is raining outside the midnight bookshop. You have just stepped in, and Mira looks up from a well-worn novel.', greeting='*A little bell rings as you step inside. I tuck a receipt into my book and smile.*\nYou look like someone escaping the rain. Or looking for a story. Either way, there’s a chair by the window.'),
+    dict(name='Ash', subtitle='Your charmingly chaotic space pilot', avatar='✧', color='amber', tags=['adventurous', 'sarcastic', 'loyal'], background='Ash is a 30-year-old freelance pilot running a battered ship called the Lucky Break. Raised on a crowded orbital station, Ash learned to improvise, haggle, and make friends in unlikely places. Ash loves danger more than paperwork, uses jokes under pressure, and will always come back for a friend. Ash secretly hopes to find a quiet planet to call home.', style='Quick, casual, irreverent. A little swagger and affectionate sarcasm. Weave in small details from life aboard a spaceship, without overdoing exposition.', scenario='You are Ash’s newest traveling companion. The ship is docked at a busy trading station, and your next destination is undecided.', greeting='*I kick my boots off the dashboard as you come aboard.*\nGood news: the ship still flies. Bad news: I may have promised three different people the same cargo space. Want coffee before we solve that?'),
+    dict(name='Ren', subtitle='A quiet artist with a curious mind', avatar='❋', color='sage', tags=['creative', 'thoughtful', 'gentle'], background='Ren is a 26-year-old illustrator living in a small apartment full of plants and unfinished paintings. Ren moved to the city to pursue art, works part-time in a flower shop, and carries a sketchbook everywhere. Ren notices tiny things others miss, is shy at first but grows warm with trust, and enjoys discussing dreams, music, and the beauty of ordinary moments.', style='Soft-spoken and sincere. Concrete observations, understated humor, and a little poetic language. Leave space for the other person. Avoid long monologues.', scenario='You are sharing a table with Ren at a neighborhood café on a quiet afternoon.', greeting='*I glance up from a page covered in little sketches.*\nI was trying to draw the light on that windowsill, but I think I accidentally drew a very dramatic potato. Would you like to judge for yourself?')
+]
+
+def now():
+    return time.time()
+
+def uid():
+    return uuid.uuid4().hex
+
+def db():
+    con = sqlite3.connect(DB_PATH, timeout=15)
+    con.row_factory = sqlite3.Row
+    con.execute('PRAGMA foreign_keys=ON')
+    return con
+
+def initialize():
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with db() as con:
+        con.executescript('''
+        PRAGMA journal_mode=WAL;
+        CREATE TABLE IF NOT EXISTS characters(id TEXT PRIMARY KEY, name TEXT NOT NULL, subtitle TEXT NOT NULL,
+          avatar TEXT NOT NULL, color TEXT NOT NULL, tags TEXT NOT NULL, background TEXT NOT NULL,
+          style TEXT NOT NULL, scenario TEXT NOT NULL, greeting TEXT NOT NULL, updated REAL NOT NULL);
+        CREATE TABLE IF NOT EXISTS chats(id TEXT PRIMARY KEY, character_id TEXT NOT NULL REFERENCES characters(id) ON DELETE CASCADE,
+          title TEXT NOT NULL, memory TEXT NOT NULL DEFAULT '', created REAL NOT NULL, updated REAL NOT NULL);
+        CREATE TABLE IF NOT EXISTS messages(id TEXT PRIMARY KEY, chat_id TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+          role TEXT NOT NULL, content TEXT NOT NULL, created REAL NOT NULL);
+        CREATE INDEX IF NOT EXISTS message_chat ON messages(chat_id, created);
+        CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        ''')
+        if not con.execute("SELECT 1 FROM settings WHERE key='initialized'").fetchone():
+            for c in DEFAULTS:
+                save_character(con, c)
+            con.execute("INSERT INTO settings VALUES ('initialized','true')")
+            con.execute("INSERT OR IGNORE INTO settings VALUES ('model','qwen3:8b')")
+
+def string(data, key, maximum=12000, required=False):
+    value = data.get(key, '')
+    if not isinstance(value, str) or len(value) > maximum:
+        raise ValueError(f'{key}: enter text of at most {maximum} characters.')
+    value = value.strip()
+    if required and not value:
+        raise ValueError(f'{key} is required.')
+    return value
+
+def save_character(con, data, character_id=None):
+    tags = data.get('tags', [])
+    if not isinstance(tags, list) or len(tags) > 20 or any(not isinstance(t, str) or len(t) > 40 for t in tags):
+        raise ValueError('Use at most 20 tags, each under 40 characters.')
+    color = data.get('color', 'plum')
+    if color not in ('plum', 'amber', 'sage', 'blue', 'rose'):
+        raise ValueError('Choose a valid character color.')
+    values = (character_id or uid(), string(data, 'name', 60, True), string(data, 'subtitle', 160),
+              string(data, 'avatar', 8) or '✧', color, json.dumps(list(dict.fromkeys(t.strip() for t in tags if t.strip()))),
+              string(data, 'background', required=True), string(data, 'style', 4000), string(data, 'scenario', 4000),
+              string(data, 'greeting', 4000), now())
+    con.execute('INSERT INTO characters VALUES (?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name, subtitle=excluded.subtitle, avatar=excluded.avatar, color=excluded.color, tags=excluded.tags, background=excluded.background, style=excluded.style, scenario=excluded.scenario, greeting=excluded.greeting, updated=excluded.updated', values)
+    return values[0]
+
+def character(row):
+    c = dict(row)
+    c['tags'] = json.loads(c['tags'])
+    return c
+
+def get_row(con, table, record_id):
+    row = con.execute(f'SELECT * FROM {table} WHERE id=?', (record_id,)).fetchone()
+    if not row:
+        raise LookupError('This item no longer exists.')
+    return row
+
+def models():
+    try:
+        with urlopen(OLLAMA + '/api/tags', timeout=3) as r:
+            names = [m['name'] for m in json.load(r).get('models', [])]
+        # Cloud-backed models are intentionally excluded from this local app.
+        return [n for n in names if 'cloud' not in n.lower()], None
+    except (OSError, ValueError) as e:
+        return [], 'Ollama is offline. Open Ollama, then click Refresh in Settings.'
+
+def prompt(c, memory):
+    return f'''You are roleplaying a fictional character named {c['name']} in a private creative conversation.
+Stay consistent with the character's background, temperament, and voice. React naturally to the user's words.
+Write only the character's next response, generally 1–3 short paragraphs. Do not narrate the user's actions,
+thoughts, or dialogue. You may use *brief actions* when appropriate. Avoid generic assistant introductions.
+Background: {c['background']}
+Personality tags: {', '.join(c['tags'])}
+Speaking style: {c['style']}
+Scene: {c['scenario']}
+Pinned facts to remember about this conversation: {memory or '(none yet)'}
+The recent messages below are conversation history. Stay in character while responding.'''
+
+class Handler(BaseHTTPRequestHandler):
+    server_version = 'CharacterRoom/1.0'
+
+    def log_message(self, *_):
+        pass  # Chat text is never written to logs.
+
+    def valid_host(self):
+        return self.headers.get('Host') in (f'127.0.0.1:{self.server.server_port}', f'localhost:{self.server.server_port}')
+
+    def headers_out(self, status, mime):
+        self.send_response(status)
+        self.send_header('Content-Type', mime)
+        self.send_header('Cache-Control', 'no-store')
+        self.send_header('X-Content-Type-Options', 'nosniff')
+        self.send_header('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
+
+    def output(self, value, status=200):
+        raw = json.dumps(value, ensure_ascii=False).encode()
+        self.headers_out(status, 'application/json; charset=utf-8')
+        self.send_header('Content-Length', str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+
+    def do_GET(self):
+        if not self.valid_host():
+            return self.output({'error': 'Invalid host'}, 403)
+        try:
+            path = self.path.split('?')[0]
+            if path == '/api/health':
+                return self.output({'app': 'character-room', 'version': 1})
+            if path == '/api/state':
+                with db() as con:
+                    return self.output({'characters': [character(r) for r in con.execute('SELECT * FROM characters ORDER BY updated DESC')],
+                        'chats': [dict(r) for r in con.execute('SELECT * FROM chats ORDER BY updated DESC')],
+                        'settings': dict(con.execute('SELECT key,value FROM settings'))})
+            if path == '/api/models':
+                names, error = models()
+                return self.output({'models': names, 'error': error})
+            if path == '/api/export':
+                with db() as con:
+                    backup = {'format': 'character-room-v1', 'characters': [character(r) for r in con.execute('SELECT * FROM characters')],
+                        'chats': [dict(r) for r in con.execute('SELECT * FROM chats')],
+                        'messages': [dict(r) for r in con.execute('SELECT * FROM messages ORDER BY created')],
+                        'settings': dict(con.execute('SELECT key,value FROM settings'))}
+                    return self.output(backup)
+            if path.startswith('/api/chats/'):
+                chat_id = path.split('/')[3]
+                with db() as con:
+                    chat = dict(get_row(con, 'chats', chat_id))
+                    chat['messages'] = [dict(r) for r in con.execute('SELECT * FROM messages WHERE chat_id=? ORDER BY created, rowid', (chat_id,))]
+                    return self.output(chat)
+            static = {'/': ('index.html', 'text/html; charset=utf-8'), '/app.js': ('app.js', 'text/javascript; charset=utf-8'), '/style.css': ('style.css', 'text/css; charset=utf-8')}
+            if path not in static:
+                return self.output({'error': 'Not found'}, 404)
+            file, mime = static[path]
+            raw = (ROOT / 'static' / file).read_bytes()
+            self.headers_out(200, mime)
+            self.send_header('Content-Length', str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+        except LookupError as e:
+            self.output({'error': str(e)}, 404)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+
+    def do_POST(self):
+        origin = self.headers.get('Origin')
+        allowed = (f'http://127.0.0.1:{self.server.server_port}', f'http://localhost:{self.server.server_port}')
+        if not self.valid_host() or (origin and origin not in allowed) or self.headers.get('X-Character-Room') != '1':
+            return self.output({'error': 'Request must come from Character Room.'}, 403)
+        try:
+            size = int(self.headers.get('Content-Length', '0'))
+            if size < 1 or size > 2_000_000:
+                raise ValueError('Request is empty or too large.')
+            data = json.loads(self.rfile.read(size))
+            if not isinstance(data, dict):
+                raise ValueError('Expected an object.')
+            parts = self.path.strip('/').split('/')
+            if self.path == '/api/shutdown':
+                with LOCK_GUARD:
+                    if any(lock.locked() for lock in LOCKS.values()):
+                        raise ValueError('A character is still replying. Try stopping the app after it finishes.')
+                self.output({'ok': True})
+                threading.Thread(target=self.server.shutdown, daemon=True).start()
+                return
+            if self.path == '/api/characters':
+                with db() as con:
+                    record_id = save_character(con, data)
+                return self.output({'id': record_id})
+            if len(parts) == 3 and parts[:2] == ['api', 'characters']:
+                with db() as con:
+                    get_row(con, 'characters', parts[2])
+                    if data.get('delete'):
+                        # Reject deletion while a reply for this character is being generated.
+                        if self.character_busy(con, parts[2]):
+                            raise ValueError('Wait for this character to finish replying before deleting.')
+                        con.execute('DELETE FROM characters WHERE id=?', (parts[2],))
+                    else:
+                        save_character(con, data, parts[2])
+                return self.output({'ok': True})
+            if self.path == '/api/chats':
+                with db() as con:
+                    c = get_row(con, 'characters', string(data, 'character_id', 64, True))
+                    chat_id = uid()
+                    con.execute('INSERT INTO chats VALUES (?,?,?,?,?,?)', (chat_id, c['id'], 'A new conversation', '', now(), now()))
+                    if c['greeting']:
+                        con.execute('INSERT INTO messages VALUES (?,?,?,?,?)', (uid(), chat_id, 'assistant', c['greeting'], now()))
+                return self.output({'id': chat_id})
+            if self.path == '/api/settings':
+                name = string(data, 'model', 200, True)
+                available, error = models()
+                if name not in available:
+                    raise ValueError(error or 'Select a downloaded local model.')
+                with db() as con:
+                    con.execute("INSERT OR REPLACE INTO settings VALUES ('model',?)", (name,))
+                return self.output({'ok': True})
+            if len(parts) == 4 and parts[:2] == ['api', 'chats'] and parts[3] == 'reply':
+                return self.reply(parts[2], data)
+            if len(parts) == 3 and parts[:2] == ['api', 'chats']:
+                lock = chat_lock(parts[2])
+                if not lock.acquire(blocking=False):
+                    raise ValueError('Wait for the reply to finish before changing this conversation.')
+                try:
+                    with db() as con:
+                        get_row(con, 'chats', parts[2])
+                        if data.get('delete'):
+                            con.execute('DELETE FROM chats WHERE id=?', (parts[2],))
+                        else:
+                            for key, limit in [('title', 100), ('memory', 6000)]:
+                                if key in data:
+                                    value = string(data, key, limit, key == 'title')
+                                    con.execute(f'UPDATE chats SET {key}=?,updated=? WHERE id=?', (value, now(), parts[2]))
+                    return self.output({'ok': True})
+                finally:
+                    lock.release()
+            self.output({'error': 'Not found'}, 404)
+        except LookupError as e:
+            self.output({'error': str(e)}, 404)
+        except (ValueError, json.JSONDecodeError) as e:
+            self.output({'error': str(e)}, 400)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        except Exception as e:
+            print('Request failed:', type(e).__name__, flush=True)
+            self.output({'error': 'A local server error occurred. Your saved chats are still on disk.'}, 500)
+
+    def character_busy(self, con, character_id):
+        return any(chat_lock(r['id']).locked() for r in con.execute('SELECT id FROM chats WHERE character_id=?', (character_id,)))
+
+    def reply(self, chat_id, data):
+        lock = chat_lock(chat_id)
+        if not lock.acquire(blocking=False):
+            raise ValueError('This conversation is already receiving a reply.')
+        stream_started = False
+        disconnected = False
+        def event(value):
+            nonlocal disconnected
+            if disconnected:
+                return
+            try:
+                self.wfile.write((json.dumps(value, ensure_ascii=False) + '\n').encode())
+                self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                disconnected = True
+        try:
+            with db() as con:
+                chat = dict(get_row(con, 'chats', chat_id))
+                c = character(get_row(con, 'characters', chat['character_id']))
+                history = [dict(r) for r in con.execute('SELECT role,content FROM messages WHERE chat_id=? ORDER BY created,rowid', (chat_id,))]
+                text = string(data, 'message', 6000)
+                # A failed generation leaves the user message saved. Retry never adds it twice.
+                if history and history[-1]['role'] == 'user':
+                    if text:
+                        raise ValueError('Retry the unanswered message before sending another one.')
+                elif text:
+                    con.execute('INSERT INTO messages VALUES (?,?,?,?,?)', (uid(), chat_id, 'user', text, now()))
+                    history.append({'role': 'user', 'content': text})
+                    title = text[:55] if chat['title'] == 'A new conversation' else chat['title']
+                    con.execute('UPDATE chats SET title=?,updated=? WHERE id=?', (title, now(), chat_id))
+                else:
+                    raise ValueError('Write a message first.')
+                model = con.execute("SELECT value FROM settings WHERE key='model'").fetchone()[0]
+            # Keep the recent context bounded, while retaining all messages on disk.
+            recent, budget = [], 0
+            for message in reversed(history):
+                if budget + len(message['content']) > 16000:
+                    break
+                recent.insert(0, message)
+                budget += len(message['content'])
+            payload = {'model': model, 'messages': [{'role': 'system', 'content': prompt(c, chat['memory'])}] + recent,
+                       'stream': True, 'think': False, 'options': {'temperature': 0.85, 'num_ctx': 16384, 'num_predict': 650}}
+            self.headers_out(200, 'application/x-ndjson; charset=utf-8')
+            self.send_header('Connection', 'close')
+            self.end_headers()
+            self.close_connection = True
+            stream_started = True
+            event({'type': 'saved'})
+            names, error = models()
+            if model not in names:
+                raise ValueError(error or 'The selected model is missing. Choose a downloaded model in Settings.')
+            req = Request(OLLAMA + '/api/chat', json.dumps(payload).encode(), {'Content-Type': 'application/json'})
+            content = ''
+            complete = False
+            with urlopen(req, timeout=300) as response:
+                for line in response:
+                    item = json.loads(line)
+                    if item.get('error'):
+                        raise ValueError(item['error'])
+                    chunk = item.get('message', {}).get('content', '')
+                    if chunk:
+                        content += chunk
+                        event({'type': 'token', 'text': chunk})
+                    if item.get('done'):
+                        complete = True
+                        break
+            if not complete or not content.strip():
+                raise ValueError('The model did not finish a reply. Please retry.')
+            with db() as con:
+                con.execute('INSERT INTO messages VALUES (?,?,?,?,?)', (uid(), chat_id, 'assistant', content.strip(), now()))
+                con.execute('UPDATE chats SET updated=? WHERE id=?', (now(), chat_id))
+            event({'type': 'done'})
+        except (OSError, ValueError) as e:
+            if stream_started:
+                message = str(e) if isinstance(e, ValueError) else 'Ollama could not finish the reply. Check Settings and retry. Your message is saved.'
+                event({'type': 'error', 'error': message})
+            else:
+                raise
+        finally:
+            lock.release()
+
+def chat_lock(chat_id):
+    with LOCK_GUARD:
+        return LOCKS.setdefault(chat_id, threading.Lock())
+
+def start_ollama():
+    if models()[1] is None:
+        return
+    executable = shutil.which('ollama')
+    if not executable:
+        candidate = Path(os.environ.get('LOCALAPPDATA', '')) / 'Programs/Ollama/ollama.exe'
+        if candidate.exists():
+            executable = str(candidate)
+    if executable:
+        subprocess.Popen([executable, 'serve'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--port', type=int, default=8765)
+    parser.add_argument('--open', action='store_true')
+    parser.add_argument('--stop', action='store_true')
+    parser.add_argument('--db', type=Path, help='Alternate database for testing or a separate library')
+    args = parser.parse_args()
+    global DB_PATH
+    if args.db:
+        DB_PATH = args.db.resolve()
+    url = f'http://127.0.0.1:{args.port}'
+    if args.stop:
+        try:
+            with urlopen(url + '/api/health', timeout=3) as r:
+                if json.load(r).get('app') != 'character-room':
+                    raise ValueError('This port belongs to a different app.')
+            req = Request(url + '/api/shutdown', b'{}', {'Content-Type': 'application/json', 'X-Character-Room': '1'})
+            with urlopen(req, timeout=5) as r:
+                print('Character Room stopped. Your conversations are saved.')
+        except HTTPError as e:
+            print(json.load(e).get('error', str(e)))
+        except (OSError, ValueError):
+            print('Character Room is not running on this port.')
+        return
+    if args.open:
+        try:
+            with urlopen(url + '/api/health', timeout=2) as r:
+                if json.load(r).get('app') == 'character-room':
+                    webbrowser.open(url)
+                    return
+        except (OSError, ValueError):
+            pass
+    initialize()
+    start_ollama()
+    server = ThreadingHTTPServer(('127.0.0.1', args.port), Handler)
+    server.daemon_threads = True
+    print(f'Character Room is running at {url}', flush=True)
+    if args.open:
+        webbrowser.open(url)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
+
+if __name__ == '__main__':
+    main()

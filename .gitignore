@@ -1,0 +1,19 @@
+# Private local library: never publish characters, conversations, or memories.
+data/
+*.sqlite
+*.sqlite3
+*.sqlite3-*
+*.db
+
+# Exports, logs, local configuration, and Python caches.
+*backup*.json
+*conversation*.txt
+*.log
+.env
+.env.*
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.DS_Store
+Thumbs.db
