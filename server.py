@@ -555,6 +555,13 @@ class Handler(BaseHTTPRequestHandler):
                 payload = {'model': model, 'messages': [{'role': 'system', 'content': system}] + recent,
                            'stream': True, 'think': False, 'options': {'temperature': 0.65 if chat['kind'] == 'group' else 0.85,
                                                                    'num_ctx': 16384, 'num_predict': 1000 if chat['kind'] == 'group' else 650}}
+                if chat['kind'] == 'group':
+                    request = latest_user['content'] if latest_user else 'Work on the shared task.'
+                    payload['messages'].append({'role': 'user', 'content':
+                        f"Your turn as {c['name']}. Shared task and requirements: {chat['memory'] or request}\n"
+                        f"Current user request: {request}\n"
+                        "Use earlier contributions as team notes. Provide useful task work, a concrete improvement, or a final synthesis. "
+                        "Do not continue unrelated character dialogue or scene-setting."})
                 req = Request(OLLAMA + '/api/chat', json.dumps(payload).encode(), {'Content-Type': 'application/json'})
                 content, complete = '', False
                 with urlopen(req, timeout=300) as response:
