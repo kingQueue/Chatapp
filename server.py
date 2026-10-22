@@ -1,7 +1,11 @@
 """Character Room — local-only character chat. Python standard library only."""
 import argparse
+import base64
+import binascii
 import json
 import os
+import secrets
+import socket
 from pathlib import Path
 import shutil
 import sqlite3
@@ -13,12 +17,18 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
+from http.cookies import SimpleCookie
 
 ROOT = Path(__file__).resolve().parent
 DB_PATH = ROOT / 'data' / 'character-room.sqlite3'
 OLLAMA = 'http://127.0.0.1:11434'
 LOCKS = {}
 LOCK_GUARD = threading.Lock()
+NETWORK_GUARD = threading.Lock()
+NETWORK_SERVER = None
+NETWORK_CODE = ''
+NETWORK_SESSIONS = set()
+LOGIN_ATTEMPTS = {}
 DEFAULTS = [
     dict(name='Mira', subtitle='The midnight bookshop keeper', avatar='☾', color='plum', tags=['warm', 'witty', 'bookish'], background='Mira is 28 and owns a tiny bookshop that opens only after sunset. She grew up above her grandmother’s bookstore and believes every person has a book they need before they know it. She is observant, quietly playful, and fond of rain, handwritten notes, and terrible literary puns. She sometimes hides her own loneliness behind caring for others.', style='Gentle, perceptive, lightly teasing. Use vivid but brief descriptions and occasional dry humor. Ask thoughtful questions without sounding like a therapist.', scenario='It is raining outside the midnight bookshop. You have just stepped in, and Mira looks up from a well-worn novel.', greeting='*A little bell rings as you step inside. I tuck a receipt into my book and smile.*\nYou look like someone escaping the rain. Or looking for a story. Either way, there’s a chair by the window.'),
     dict(name='Ash', subtitle='Your charmingly chaotic space pilot', avatar='✧', color='amber', tags=['adventurous', 'sarcastic', 'loyal'], background='Ash is a 30-year-old freelance pilot running a battered ship called the Lucky Break. Raised on a crowded orbital station, Ash learned to improvise, haggle, and make friends in unlikely places. Ash loves danger more than paperwork, uses jokes under pressure, and will always come back for a friend. Ash secretly hopes to find a quiet planet to call home.', style='Quick, casual, irreverent. A little swagger and affectionate sarcasm. Weave in small details from life aboard a spaceship, without overdoing exposition.', scenario='You are Ash’s newest traveling companion. The ship is docked at a busy trading station, and your next destination is undecided.', greeting='*I kick my boots off the dashboard as you come aboard.*\nGood news: the ship still flies. Bad news: I may have promised three different people the same cargo space. Want coffee before we solve that?'),
@@ -52,6 +62,11 @@ def initialize():
         CREATE INDEX IF NOT EXISTS message_chat ON messages(chat_id, created);
         CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT NOT NULL);
         ''')
+        columns = {r['name'] for r in con.execute('PRAGMA table_info(characters)')}
+        for name, definition in [('image_data', "TEXT NOT NULL DEFAULT ''"), ('voice_uri', "TEXT NOT NULL DEFAULT ''"),
+                                 ('speech_rate', 'REAL NOT NULL DEFAULT 1.0'), ('auto_read', 'INTEGER NOT NULL DEFAULT 0')]:
+            if name not in columns:
+                con.execute(f'ALTER TABLE characters ADD COLUMN {name} {definition}')
         if not con.execute("SELECT 1 FROM settings WHERE key='initialized'").fetchone():
             for c in DEFAULTS:
                 save_character(con, c)
@@ -68,6 +83,28 @@ def string(data, key, maximum=12000, required=False):
     return value
 
 def save_character(con, data, character_id=None):
+    old = dict(get_row(con, 'characters', character_id)) if character_id else {}
+    media = {key: data.get(key, old.get(key, default)) for key, default in
+             [('image_data', ''), ('voice_uri', ''), ('speech_rate', 1.0), ('auto_read', False)]}
+    image = media['image_data']
+    if not isinstance(image, str) or len(image) > 480000:
+        raise ValueError('Choose a smaller character image.')
+    if image:
+        try:
+            if not image.startswith('data:image/jpeg;base64,'):
+                raise ValueError()
+            raw = base64.b64decode(image.split(',', 1)[1], validate=True)
+            if len(raw) > 350000 or not raw.startswith(b'\xff\xd8\xff') or not raw.endswith(b'\xff\xd9'):
+                raise ValueError()
+        except (ValueError, binascii.Error):
+            raise ValueError('Choose a valid image using the image picker.')
+    voice_uri = string(media, 'voice_uri', 500)
+    rate = media['speech_rate']
+    if isinstance(rate, bool) or not isinstance(rate, (int, float)) or not 0.6 <= rate <= 1.6:
+        raise ValueError('Speech speed must be between 0.6 and 1.6.')
+    auto_read = media['auto_read']
+    if auto_read not in (True, False, 0, 1):
+        raise ValueError('Auto-read must be on or off.')
     tags = data.get('tags', [])
     if not isinstance(tags, list) or len(tags) > 20 or any(not isinstance(t, str) or len(t) > 40 for t in tags):
         raise ValueError('Use at most 20 tags, each under 40 characters.')
@@ -77,8 +114,8 @@ def save_character(con, data, character_id=None):
     values = (character_id or uid(), string(data, 'name', 60, True), string(data, 'subtitle', 160),
               string(data, 'avatar', 8) or '✧', color, json.dumps(list(dict.fromkeys(t.strip() for t in tags if t.strip()))),
               string(data, 'background', required=True), string(data, 'style', 4000), string(data, 'scenario', 4000),
-              string(data, 'greeting', 4000), now())
-    con.execute('INSERT INTO characters VALUES (?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name, subtitle=excluded.subtitle, avatar=excluded.avatar, color=excluded.color, tags=excluded.tags, background=excluded.background, style=excluded.style, scenario=excluded.scenario, greeting=excluded.greeting, updated=excluded.updated', values)
+              string(data, 'greeting', 4000), now(), image, voice_uri, rate, int(auto_read))
+    con.execute('INSERT INTO characters (id,name,subtitle,avatar,color,tags,background,style,scenario,greeting,updated,image_data,voice_uri,speech_rate,auto_read) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name, subtitle=excluded.subtitle, avatar=excluded.avatar, color=excluded.color, tags=excluded.tags, background=excluded.background, style=excluded.style, scenario=excluded.scenario, greeting=excluded.greeting, updated=excluded.updated, image_data=excluded.image_data, voice_uri=excluded.voice_uri, speech_rate=excluded.speech_rate, auto_read=excluded.auto_read', values)
     return values[0]
 
 def character(row):
@@ -113,6 +150,55 @@ Scene: {c['scenario']}
 Pinned facts to remember about this conversation: {memory or '(none yet)'}
 The recent messages below are conversation history. Stay in character while responding.'''
 
+def local_addresses():
+    addresses = set()
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+            ip = info[4][0]
+            if ip.startswith(('10.', '192.168.')) or (ip.startswith('172.') and 16 <= int(ip.split('.')[1]) <= 31):
+                addresses.add(ip)
+    except OSError:
+        pass
+    return sorted(addresses)
+
+def network_status(include_code=True):
+    return {'enabled': NETWORK_SERVER is not None, 'can_manage': include_code,
+            'addresses': local_addresses() if include_code else [],
+            'address': NETWORK_SERVER.server_address[0] if NETWORK_SERVER else '',
+            'urls': [f'http://{NETWORK_SERVER.server_address[0]}:8766'] if NETWORK_SERVER else [],
+            'code': NETWORK_CODE if include_code and NETWORK_SERVER else ''}
+
+def set_network(enabled, persist=True, address=None):
+    global NETWORK_SERVER, NETWORK_CODE
+    with NETWORK_GUARD:
+        if enabled and NETWORK_SERVER is None:
+            available = local_addresses()
+            if address is None:
+                address = next((ip for ip in available if ip.startswith('192.168.')), available[0] if available else '')
+            if address not in available:
+                raise ValueError('Choose an address on your home network. Connect to Wi-Fi and try again.')
+            try:
+                server = ThreadingHTTPServer((address, 8766), Handler)
+            except OSError:
+                raise ValueError('Could not open phone access on port 8766. Another app may be using it.')
+            server.daemon_threads = True
+            server.is_lan = True
+            server.allowed_hosts = [address]
+            code = secrets.token_hex(6).upper()
+            NETWORK_CODE = code[:6] + '-' + code[6:]
+            NETWORK_SERVER = server
+            threading.Thread(target=server.serve_forever, daemon=True).start()
+        elif not enabled and NETWORK_SERVER is not None:
+            NETWORK_SERVER.shutdown()
+            NETWORK_SERVER.server_close()
+            NETWORK_SERVER = None
+            NETWORK_CODE = ''
+            NETWORK_SESSIONS.clear()
+            LOGIN_ATTEMPTS.clear()
+        if persist:
+            (DB_PATH.parent / 'network.json').write_text(json.dumps({'enabled': enabled, 'address': NETWORK_SERVER.server_address[0] if NETWORK_SERVER else ''}), encoding='utf-8')
+    return network_status()
+
 class Handler(BaseHTTPRequestHandler):
     server_version = 'CharacterRoom/1.0'
 
@@ -120,7 +206,25 @@ class Handler(BaseHTTPRequestHandler):
         pass  # Chat text is never written to logs.
 
     def valid_host(self):
-        return self.headers.get('Host') in (f'127.0.0.1:{self.server.server_port}', f'localhost:{self.server.server_port}')
+        hosts = getattr(self.server, 'allowed_hosts', ['127.0.0.1', 'localhost'])
+        return self.headers.get('Host') in [f'{host}:{self.server.server_port}' for host in hosts]
+
+    def authenticated(self):
+        if not getattr(self.server, 'is_lan', False):
+            return True
+        try:
+            cookie = SimpleCookie(self.headers.get('Cookie', ''))
+            token = cookie.get('character_room_session')
+            return bool(token and token.value in NETWORK_SESSIONS)
+        except Exception:
+            return False
+
+    def static(self, file, mime):
+        raw = (ROOT / 'static' / file).read_bytes()
+        self.headers_out(200, mime)
+        self.send_header('Content-Length', str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
 
     def headers_out(self, status, mime):
         self.send_response(status)
@@ -141,8 +245,16 @@ class Handler(BaseHTTPRequestHandler):
             return self.output({'error': 'Invalid host'}, 403)
         try:
             path = self.path.split('?')[0]
+            if not self.authenticated():
+                if path in ('/', '/login'):
+                    return self.static('login.html', 'text/html; charset=utf-8')
+                if path in ('/style.css', '/login.js'):
+                    return self.static(path[1:], 'text/css; charset=utf-8' if path.endswith('.css') else 'text/javascript; charset=utf-8')
+                return self.output({'error': 'Enter the phone access code first.'}, 401)
+            if path == '/api/network':
+                return self.output(network_status(include_code=not getattr(self.server, 'is_lan', False)))
             if path == '/api/health':
-                return self.output({'app': 'character-room', 'version': 1})
+                return self.output({'app': 'character-room', 'version': 2})
             if path == '/api/state':
                 with db() as con:
                     return self.output({'characters': [character(r) for r in con.execute('SELECT * FROM characters ORDER BY updated DESC')],
@@ -164,7 +276,7 @@ class Handler(BaseHTTPRequestHandler):
                     chat = dict(get_row(con, 'chats', chat_id))
                     chat['messages'] = [dict(r) for r in con.execute('SELECT * FROM messages WHERE chat_id=? ORDER BY created, rowid', (chat_id,))]
                     return self.output(chat)
-            static = {'/': ('index.html', 'text/html; charset=utf-8'), '/app.js': ('app.js', 'text/javascript; charset=utf-8'), '/style.css': ('style.css', 'text/css; charset=utf-8')}
+            static = {'/': ('index.html', 'text/html; charset=utf-8'), '/app.js': ('app.js', 'text/javascript; charset=utf-8'), '/speech.js': ('speech.js', 'text/javascript; charset=utf-8'), '/style.css': ('style.css', 'text/css; charset=utf-8')}
             if path not in static:
                 return self.output({'error': 'Not found'}, 404)
             file, mime = static[path]
@@ -180,7 +292,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         origin = self.headers.get('Origin')
-        allowed = (f'http://127.0.0.1:{self.server.server_port}', f'http://localhost:{self.server.server_port}')
+        allowed = (f"http://{self.headers.get('Host')}",)
         if not self.valid_host() or (origin and origin not in allowed) or self.headers.get('X-Character-Room') != '1':
             return self.output({'error': 'Request must come from Character Room.'}, 403)
         try:
@@ -191,6 +303,30 @@ class Handler(BaseHTTPRequestHandler):
             if not isinstance(data, dict):
                 raise ValueError('Expected an object.')
             parts = self.path.strip('/').split('/')
+            if self.path == '/api/login' and getattr(self.server, 'is_lan', False):
+                address = self.client_address[0]
+                with NETWORK_GUARD:
+                    attempts = [t for t in LOGIN_ATTEMPTS.get(address, []) if now() - t < 60]
+                    if len(attempts) >= 10:
+                        return self.output({'error': 'Too many attempts. Wait one minute and try again.'}, 429)
+                    code = string(data, 'code', 100)
+                    if not code.isascii() or not secrets.compare_digest(code, NETWORK_CODE):
+                        LOGIN_ATTEMPTS[address] = attempts + [now()]
+                        return self.output({'error': 'That access code is incorrect.'}, 401)
+                    token = secrets.token_urlsafe(32)
+                    NETWORK_SESSIONS.add(token)
+                    LOGIN_ATTEMPTS.pop(address, None)
+                self.headers_out(200, 'application/json')
+                self.send_header('Set-Cookie', f'character_room_session={token}; HttpOnly; SameSite=Strict; Path=/')
+                self.end_headers()
+                self.wfile.write(b'{"ok":true}')
+                return
+            if not self.authenticated():
+                return self.output({'error': 'Enter the phone access code first.'}, 401)
+            if self.path in ('/api/network', '/api/shutdown') and getattr(self.server, 'is_lan', False):
+                return self.output({'error': 'Manage phone access and shutdown from this PC.'}, 403)
+            if self.path == '/api/network':
+                return self.output(set_network(data.get('enabled') is True, address=data.get('address')))
             if self.path == '/api/shutdown':
                 with LOCK_GUARD:
                     if any(lock.locked() for lock in LOCKS.values()):
@@ -395,6 +531,12 @@ def main():
     start_ollama()
     server = ThreadingHTTPServer(('127.0.0.1', args.port), Handler)
     server.daemon_threads = True
+    try:
+        config = json.loads((DB_PATH.parent / 'network.json').read_text(encoding='utf-8'))
+        if config.get('enabled'):
+            set_network(True, persist=False, address=config.get('address') or None)
+    except (OSError, ValueError):
+        pass
     print(f'Character Room is running at {url}', flush=True)
     if args.open:
         webbrowser.open(url)
@@ -403,6 +545,7 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
+        set_network(False, persist=False)
         server.server_close()
 
 if __name__ == '__main__':

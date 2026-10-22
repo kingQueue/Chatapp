@@ -1,0 +1,26 @@
+const assert=require('node:assert/strict');
+const fs=require('node:fs');
+const vm=require('node:vm');
+const path=require('node:path');
+const context=vm.createContext({});
+vm.runInContext(fs.readFileSync(path.join(__dirname,'../static/speech.js'),'utf8'),context);
+class Utterance{constructor(text){this.text=text;}}
+const local={voiceURI:'local-voice',name:'Local voice',lang:'en-US',localService:true};
+const remote={voiceURI:'cloud-voice',lang:'en-US',localService:false};
+const synth={queue:[],getVoices:()=>[remote,local],cancel(){this.queue=[];},speak(u){this.queue.push(u);u.onstart();},pause(){this.paused=true;},resume(){this.paused=false;}};
+let states=[];
+const speech=new context.RoomSpeech(synth,Utterance,s=>states.push(s));
+assert.equal(speech.voices().length,1);
+speech.speak('Hello *friend*.',{name:'Mira',voice_uri:local.voiceURI,speech_rate:1.2});
+assert.equal(synth.queue[0].text,'Hello friend.');
+assert.equal(synth.queue[0].voice,local);assert.equal(synth.queue[0].rate,1.2);
+speech.pause();assert.equal(synth.paused,true);speech.pause();assert.equal(synth.paused,false);
+synth.queue[0].onend();assert.equal(speech.active,false);
+assert.throws(()=>speech.speak('hello',{voice_uri:'missing'}),/unavailable/);
+assert.throws(()=>speech.speak('hello',{voice_uri:remote.voiceURI}),/unavailable/);
+speech.speak('word '.repeat(150),{name:'Ash'});
+const first=synth.queue[0];assert.ok(first.text.length<=220);first.onend();assert.equal(synth.queue.length,2);
+speech.stop();first.onend();assert.equal(synth.queue.length,0);assert.equal(speech.active,false);
+const empty=new context.RoomSpeech({...synth,getVoices:()=>[]},Utterance);
+assert.throws(()=>empty.speak('hello',{}),/No local voices/);
+console.log('Speech tests passed: local voices, replay, speed, chunking, pause/resume, cancellation, unavailable voices.');

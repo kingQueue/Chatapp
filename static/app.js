@@ -1,10 +1,18 @@
 'use strict';
 const $ = id => document.getElementById(id);
-let state = {characters: [], chats: [], settings: {}}, activeChat = null, editingId = null, busy = false, toastTimer;
+let state = {characters: [], chats: [], settings: {}}, activeChat = null, editingId = null, busy = false, toastTimer, editorImage='', imageLoading=false, imageSequence=0, networkEnabled=false;
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const avatar = (c, size='') => `<div class="avatar ${esc(c.color)} ${size}" aria-hidden="true">${esc(c.avatar)}</div>`;
+const imageMarkup = c => c.image_data?.startsWith('data:image/jpeg;base64,') ? `<img src="${esc(c.image_data)}" alt="">` : esc(c.avatar);
+const avatar = (c, size='') => `<div class="avatar ${esc(c.color)} ${size}" aria-hidden="true">${imageMarkup(c)}</div>`;
+const speech = new RoomSpeech(window.speechSynthesis, window.SpeechSynthesisUtterance, status => {
+  $('speech-player').hidden=['stopped','error'].includes(status.state);
+  $('speech-status').textContent=status.state==='paused' ? 'Playback paused' : `Reading ${status.name || 'character'}’s reply…`;
+  $('pause-speech').textContent=status.state==='paused' ? 'Resume' : 'Pause';
+  $('voice-preview-status').textContent=['loading','speaking'].includes(status.state) ? 'Playing voice preview…' : status.state==='paused' ? 'Playback paused.' : '';
+  if(status.state==='error')toast(status.message);
+});
 const tags = c => c.tags.map(t => `<span class="tag">${esc(t)}</span>`).join('');
-function toast(message) { $('toast').textContent = message; $('toast').hidden = false; clearTimeout(toastTimer); toastTimer = setTimeout(() => $('toast').hidden = true, 5000); }
+function toast(message) { const target=document.querySelector('dialog[open]')||document.body;target.append($('toast'));$('toast').textContent = message; $('toast').hidden = false; clearTimeout(toastTimer); toastTimer = setTimeout(() => $('toast').hidden = true, 5000); }
 function action(fn) { return (...args) => { try { return Promise.resolve(fn(...args)).catch(e => toast(e.message)); } catch(e) { toast(e.message); } }; }
 async function api(path, data) {
   const res = await fetch(path, data === undefined ? {} : {method:'POST', headers:{'Content-Type':'application/json','X-Character-Room':'1'},body:JSON.stringify(data)});
@@ -35,6 +43,7 @@ function renderRecent() {
 }
 function showLibrary() {
   if (!canLeave()) return;
+  speech.stop();
   $('library').hidden = false; $('chat-view').hidden = true;
   activeChat = null;
   localStorage.removeItem('character-room-active-chat');
@@ -49,6 +58,7 @@ async function openCharacter(id, forceNew=false) {
 }
 async function openChat(id) {
   if (!canLeave()) return;
+  speech.stop();
   activeChat = await api('/api/chats/' + id);
   localStorage.setItem('character-room-active-chat', id);
   $('library').hidden = true; $('chat-view').hidden = false;
@@ -59,7 +69,9 @@ function renderChat() {
   const c = currentCharacter(); if (!c) return showLibrary();
   $('chat-name').textContent = c.name; $('chat-subtitle').textContent = c.subtitle;
   $('chat-title').textContent = activeChat.title;
-  $('chat-avatar').className = 'avatar small ' + c.color; $('chat-avatar').textContent = c.avatar;
+  $('chat-avatar').className = 'avatar small ' + c.color; $('chat-avatar').innerHTML = imageMarkup(c);
+  $('mobile-chat-picker').innerHTML=state.chats.map(chat=>`<option value="${chat.id}">${esc(state.characters.find(person=>person.id===chat.character_id)?.name)} · ${esc(chat.title)}</option>`).join('');
+  $('mobile-chat-picker').value=activeChat.id;
   $('message-input').placeholder = `Message ${c.name}…`;
   $('profile-content').innerHTML = `${avatar(c)}<h2>${esc(c.name)}</h2><p class="subtitle">${esc(c.subtitle)}</p><div class="tags">${tags(c)}</div><h3>Their story</h3><p class="bio">${esc(c.background)}</p>${c.style ? `<h3>Their voice</h3><p class="bio">${esc(c.style)}</p>` : ''}${c.scenario ? `<h3>The scene</h3><p class="bio">${esc(c.scenario)}</p>` : ''}`;
   $('memory-input').value = activeChat.memory;
@@ -71,17 +83,18 @@ function renderChat() {
   $('send-button').disabled = unanswered;
 }
 function formatMessage(text) { return esc(text).replace(/\*([^*\n]+)\*/g, '<em>$1</em>'); }
-function messageHTML(message) {
+function messageHTML(message, index) {
   const c = currentCharacter(), user = message.role === 'user';
-  return `<div class="message ${user ? 'user' : ''}">${user ? '' : avatar(c,'tiny')}<div class="message-body"><p class="message-label">${user ? 'You' : esc(c.name)}</p><div class="message-text">${formatMessage(message.content)}</div></div></div>`;
+  return `<div class="message ${user ? 'user' : ''}">${user ? '' : avatar(c,'tiny')}<div class="message-body"><p class="message-label">${user ? 'You' : esc(c.name)}</p><div class="message-text">${formatMessage(message.content)}</div>${user ? '' : `<button class="text-button read-aloud" data-read="${index}" aria-label="Read reply ${index+1} aloud">▷ Read aloud</button>`}</div></div>`;
 }
-function renderMessages() { $('messages').innerHTML = activeChat.messages.map(messageHTML).join(''); scrollMessages(); }
+function renderMessages() { $('messages').innerHTML = activeChat.messages.map(messageHTML).join(''); document.querySelectorAll('[data-read]').forEach(button=>button.onclick=action(()=>speech.speak(activeChat.messages[Number(button.dataset.read)].content,currentCharacter()))); scrollMessages(); }
 function scrollMessages() { $('messages').scrollTop = $('messages').scrollHeight; }
 async function sendMessage(retry=false) {
   if (busy || !activeChat) return;
   const text = retry ? '' : $('message-input').value.trim();
   if (!retry && !text) return;
   const chatId = activeChat.id;
+  speech.stop();
   busy = true;
   $('send-button').disabled = true; $('message-input').disabled = true; $('retry-button').disabled = true;
   $('reply-error').hidden = true;
@@ -111,23 +124,32 @@ async function sendMessage(retry=false) {
     catch (e) { pending.remove(); if (!retry) $('message-input').value=text; toast('Could not refresh saved history. Reload after restarting the app.'); }
     if (error) { $('reply-error').hidden = false; $('reply-error-text').textContent=error; }
     if (!$('message-input').disabled) $('message-input').focus();
+    if(complete&&!error&&currentCharacter()?.auto_read){try{speech.speak(activeChat.messages.at(-1).content,currentCharacter());}catch(e){toast(e.message);}}
   }
 }
 function openEditor(id=null) {
   if (!canLeave()) return;
+  speech.stop(); imageSequence++; imageLoading=false;
   editingId = id;
   $('character-form').reset();
   $('editor-title').textContent = id ? 'Edit character' : 'Create a character';
   $('delete-character').hidden = !id;
   if (id) { const c=state.characters.find(c=>c.id===id); for (const key of ['name','subtitle','avatar','color','background','style','scenario','greeting']) $('character-form').elements.namedItem(key).value=c[key]; $('character-form').elements.namedItem('tags').value=c.tags.join(', '); }
+  const c=state.characters.find(c=>c.id===id);
+  editorImage=c?.image_data||''; renderImagePreview();
+  $('speech-rate').value=c?.speech_rate||1; $('speech-rate-value').textContent=Number($('speech-rate').value).toFixed(2)+'×';
+  $('auto-read').checked=!!c?.auto_read;
+  populateVoices(c?.voice_uri||'');
   $('character-dialog').showModal();
 }
 async function saveCharacter(event) {
   event.preventDefault(); const button = event.submitter; button.disabled=true;
   try {
+    if(imageLoading)throw new Error('Wait for the image preview before saving.');
     const data=Object.fromEntries(new FormData($('character-form'))); data.tags=data.tags.split(',').map(s=>s.trim()).filter(Boolean);
+    data.image_data=editorImage;data.speech_rate=Number(data.speech_rate);data.auto_read=$('auto-read').checked;
     await api('/api/characters' + (editingId ? '/' + editingId : ''),data);
-    await loadState(); $('character-dialog').close(); if (activeChat) renderChat(); toast('Character saved.');
+    await loadState(); speech.stop(); $('character-dialog').close(); if (activeChat) renderChat(); toast('Character saved.');
   } finally { button.disabled=false; }
 }
 function confirmAction(title, message, label='Delete') {
@@ -150,6 +172,55 @@ async function refreshModels() {
 function download(name, contents, mime) {
   const url=URL.createObjectURL(new Blob([contents],{type:mime}));const a=document.createElement('a');a.href=url;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(url),10000);
 }
+function renderImagePreview(){ $('image-preview').innerHTML=editorImage ? `<img src="${esc(editorImage)}" alt="Character image preview">` : '<span>✧</span>'; $('remove-image').disabled=!editorImage; }
+async function chooseImage(){
+  const file=$('character-image').files[0];if(!file)return;
+  if(!['image/jpeg','image/png','image/webp'].includes(file.type)||file.size>10*1024*1024){$('character-image').value='';throw new Error('Choose a PNG, JPG, or WebP image under 10 MB.');}
+  const sequence=++imageSequence;imageLoading=true;
+  try{
+    const source=await new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(reader.result);reader.onerror=()=>reject(new Error('Could not read that image.'));reader.readAsDataURL(file);});
+    const image=await new Promise((resolve,reject)=>{const img=new Image();img.onload=()=>resolve(img);img.onerror=()=>reject(new Error('That file could not be opened as an image.'));img.src=source;});
+    if(image.naturalWidth*image.naturalHeight>40000000)throw new Error('Choose an image smaller than 40 megapixels.');
+    const canvas=document.createElement('canvas');canvas.width=512;canvas.height=512;
+    const ctx=canvas.getContext('2d');ctx.fillStyle='#211e29';ctx.fillRect(0,0,512,512);
+    const side=Math.min(image.naturalWidth,image.naturalHeight);
+    ctx.drawImage(image,(image.naturalWidth-side)/2,(image.naturalHeight-side)/2,side,side,0,0,512,512);
+    if(sequence===imageSequence){editorImage=canvas.toDataURL('image/jpeg',0.85);renderImagePreview();}
+  }finally{if(sequence===imageSequence)imageLoading=false;$('character-image').value='';}
+}
+function populateVoices(selected=$('character-voice').value){
+  const voices=speech.voices();
+  $('character-voice').innerHTML='<option value="">Default local voice</option>'+voices.map(v=>`<option value="${esc(v.voiceURI)}">${esc(v.name)} · ${esc(v.lang)}</option>`).join('');
+  if(selected&&!voices.some(v=>v.voiceURI===selected))$('character-voice').insertAdjacentHTML('beforeend',`<option value="${esc(selected)}">Saved voice · unavailable on this device</option>`);
+  $('character-voice').value=selected;
+  $('preview-voice').disabled=!voices.length;
+  $('voice-availability').textContent=voices.length ? `${voices.length} installed local voices available. Choose a different voice for each character.` : 'No local voices found yet. Try Chrome or Edge with an installed Windows speech voice. Chat and images still work.';
+}
+async function refreshNetwork(){
+  const network=await api('/api/network');networkEnabled=network.enabled;
+  $('network-status').textContent=network.enabled ? (network.can_manage?'Phone access is on. Use the same Wi-Fi as this PC.':'You are connected to this PC over the local network.') : 'Phone access is off. Only this PC can open the app.';
+  $('network-details').hidden=!network.enabled||!network.can_manage;
+  $('network-toggle').disabled=!network.can_manage;
+  $('network-toggle').textContent=network.enabled?'Turn off phone access':'Enable phone access';
+  $('network-firewall-help').hidden=!network.can_manage;
+  $('network-addresses').innerHTML=network.urls.length ? network.urls.map(url=>`<p><a href="${esc(url)}" target="_blank" rel="noopener">${esc(url)}</a></p>`).join('') : '<p class="help">No home-network address found. Connect the PC to your Wi-Fi, then turn phone access off and on.</p>';
+  $('network-code').value=network.code;
+  const selected=$('network-interface').value;
+  $('network-interface').innerHTML=network.addresses.map(address=>`<option value="${esc(address)}">${esc(address)}</option>`).join('');
+  $('network-interface').value=network.address|| (network.addresses.includes(selected)?selected:network.addresses.find(ip=>ip.startsWith('192.168.'))||network.addresses[0]||'');
+  $('network-interface').disabled=network.enabled||!network.can_manage;
+  $('network-interface-label').hidden=!network.can_manage;
+}
+$('character-image').onchange=action(chooseImage);
+$('remove-image').onclick=()=>{imageSequence++;imageLoading=false;editorImage='';$('character-image').value='';renderImagePreview();};
+$('speech-rate').oninput=()=>$('speech-rate-value').textContent=Number($('speech-rate').value).toFixed(2)+'×';
+$('preview-voice').onclick=action(()=>speech.speak(`Hello, I’m ${$('character-form').elements.namedItem('name').value.trim()||'your character'}. This is how my replies will sound.`,{name:'voice preview',voice_uri:$('character-voice').value,speech_rate:Number($('speech-rate').value)}));
+$('stop-preview').onclick=()=>speech.stop();$('stop-speech').onclick=()=>speech.stop();$('pause-speech').onclick=()=>speech.pause();
+$('character-dialog').addEventListener('close',()=>{speech.stop();imageSequence++;imageLoading=false;});
+if(window.speechSynthesis)window.speechSynthesis.addEventListener('voiceschanged',()=>populateVoices());
+$('network-toggle').onclick=action(async()=>{const button=$('network-toggle');button.disabled=true;try{await api('/api/network',{enabled:!networkEnabled,address:$('network-interface').value});await refreshNetwork();}finally{button.disabled=false;}});
+$('mobile-chat-picker').onchange=action(()=>openChat($('mobile-chat-picker').value));
+window.addEventListener('pagehide',()=>speech.stop());
 $('search').addEventListener('input',renderLibrary);
 for (const id of ['create-nav','create-button','feature-create']) $(id).onclick=()=>openEditor();
 $('home-button').onclick=showLibrary; $('back-button').onclick=showLibrary;
@@ -167,7 +238,7 @@ $('rename-chat').onclick=()=>{if(!canLeave())return;$('rename-input').value=acti
 $('rename-form').onsubmit=action(async e=>{e.preventDefault();await api('/api/chats/'+activeChat.id,{title:$('rename-input').value});activeChat.title=$('rename-input').value;await loadState();renderChat();$('rename-dialog').close();});
 $('delete-chat').onclick=action(async()=>{if(!canLeave())return;if(!await confirmAction('Delete this conversation?','All messages and pinned memories in this conversation will be permanently deleted.'))return;await api('/api/chats/'+activeChat.id,{delete:true});showLibrary();await loadState();toast('Conversation deleted.');});
 $('delete-character').onclick=action(async()=>{if(!await confirmAction('Delete this character?', 'This also permanently deletes all conversations with this character. Export a backup first if you want to keep them.'))return;await api('/api/characters/'+editingId,{delete:true});$('character-dialog').close();if(activeChat?.character_id===editingId)showLibrary();await loadState();toast('Character deleted.');});
-$('settings-button').onclick=action(async()=>{$('settings-dialog').showModal();await refreshModels();});
+$('settings-button').onclick=action(async()=>{$('settings-dialog').showModal();await Promise.all([refreshModels(),refreshNetwork()]);});
 $('refresh-models').onclick=action(refreshModels);
 $('save-model').onclick=action(async()=>{await api('/api/settings',{model:$('model-select').value});await loadState();toast('Local model selected.');await refreshModels();});
 $('backup-button').onclick=action(async()=>{download('character-room-backup.json',JSON.stringify(await api('/api/export'),null,2),'application/json');toast('Backup exported.');});
