@@ -24,13 +24,33 @@ The dropdown refreshes from Ollama. It does not download models or connect to cl
 
 Choose **New group** or **Create a group**, give the team a name and a shared task, select **2–6 existing characters**, and arrange their speaking order. Put a reviewer or coordinator last if you want them to bring the contributions together. Groups appear in the library and recent conversations, including on a phone.
 
-Send a message, or use **Start round** to begin with the shared task. Each member contributes once, in order, through its own selected model. Later members receive earlier contributions labeled with the speaker’s name and ID. **Continue round** asks for another pass. Characters can propose plans, drafts, explanations, or analysis in chat; they cannot execute tools, browse the web, or modify files.
+Send a message, or use **Start round** to begin with the shared task. Each member contributes once, in order, through its own selected model. Later members receive earlier contributions labeled with the speaker’s name and ID. **Continue round** asks for another pass. Characters can use explicitly granted project tools as described below. Web browsing is not included.
 
 **Team details** shows members, specialties, current models, and controls to edit each character. **Shared task & memory** is sent to every member. Recent context is bounded to about 16,000 characters, while the active user task is retained even in a long round. All messages stay saved locally. Each reply shows its character and actual model, and read-aloud uses that character’s voice. Automatic speech queues enabled characters’ contributions after the round finishes.
 
 Completed contributions are saved immediately. If a later member fails, **Retry reply** resumes the unfinished members without duplicating the user message or completed contributions, including after an app restart. New messages are blocked until the unfinished round is resumed or the conversation is deleted. Changing a missing model in the character editor allows the retry to proceed.
 
 Group membership and speaking order are fixed for each conversation. **New chat** lets you create another group using the same members and task as a starting point. Delete the old group if you no longer need it. A character belonging to a group cannot be deleted until those group conversations are deleted, so shared history cannot be accidentally removed by deleting one member. Character profile edits and model changes still apply to future turns.
+
+## Windows tools and project folders
+
+On the PC, open **Settings & backup → Manage tools** to register a supported adapter, name it, and choose its installed executable or application folder. **Detect location** finds common VS Code, Git, and FreeCAD installations. Built-in file tools need no program location. You can disable a tool globally at any time. Registering a location alone grants no character access.
+
+In **Edit character → Tool permissions**, check only the tools that character may use. Then select an existing project folder when creating a group, or assign one under the chat's **Team details / Character details → Project directory**. Each character's grants apply independently within a group. Without an assigned folder, no project tools are offered. Choose a dedicated work folder separate from Character Room, installed applications, and private app data. Folder selection and permission changes are PC-only; phones can chat using the permissions already granted on the PC.
+
+Supported operations:
+
+- **Read/write files:** list folders, read paginated UTF-8 text, create text/code files, and replace existing files using the SHA-256 from a preceding read. Conflicting edits fail instead of overwriting another contributor's work. Text files are limited to 300 KB.
+- **Visual Studio Code:** open an existing project file in the installed `Code.exe`. Characters edit code through the file tools; this adapter does not run code, a terminal, or VS Code tasks. Grant read/write separately when needed. This supports VS Code, not the separate Visual Studio IDE.
+- **Local Git:** initialize a repository, inspect status/diffs/recent commits, stage explicit files, and commit. Hooks, external diff programs, remote operations, resets, checkout, linked worktrees, and repositories with execution-capable filter/include configuration are unavailable.
+- **Partmap hardware studio:** choose the existing Partmap `dist` folder containing `index.html`, `app.js`, `studio.js`, and `style.css`. Characters read/write validated project JSON with parts, hierarchy, and wiring. **Open Partmap** opens that same file in the studio, with saves back to the assigned folder and periodic refreshes of bot edits. Embedded attachments are unsupported in shared JSON; keep supporting files separately in the project. The original Partmap app files remain unchanged.
+- **FreeCAD:** select `freecadcmd.exe`. Characters create native parametric `.FCStd`, `.step`, `.stl`, and `.cad.json` files from boxes, cylinders, spheres, and cones, with positions, rotations, additions, and cuts. Outputs use a new filename stem. This adapter does not accept model-written Python or arbitrary FreeCAD macros.
+
+Use a local Ollama model that supports native tool calling. Model choice and instructions affect whether it calls a tool correctly. Watch **Tool activity** for actual arguments, successes, and errors; a character's prose alone is not evidence of a completed file operation. Each turn allows six tool cycles and twelve calls. Completed actions are audited locally, and identical calls in a resumed round reuse recorded successes. Actions interrupted during execution require reviewing the project before retrying an edit.
+
+Tool paths must stay relative to the assigned folder. The adapter blocks traversal, absolute paths, links/junctions, hard links, and protected metadata such as `.git`, `.vscode`, and `.env`. Git has a dedicated restricted adapter for its metadata. All members share the same project files. **Browse project files** previews text and downloads project artifacts, including generated CAD files. Project assignments cannot change during an unfinished round.
+
+These are application-level boundaries, not an operating-system sandbox. Trusted installed programs still run with your Windows account's normal privileges. Grant tools only to characters you trust, use dedicated project folders, and review generated code before running it yourself. Adding another executable path selects a supported adapter; it does not create arbitrary GUI or shell control. Tool registrations, locations, grants, project assignments, and audit history persist in the private local database and are included in local exports, not the public source repository.
 
 ## Images and read-aloud voices
 

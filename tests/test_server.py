@@ -10,8 +10,10 @@ from unittest.mock import patch
 import urllib.request
 import urllib.error
 import sqlite3
+import sys
 
 SOURCE = Path(__file__).resolve().parents[1] / 'server.py'
+sys.path.insert(0,str(SOURCE.parent))
 spec = importlib.util.spec_from_file_location('character_room', SOURCE)
 app = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(app)

@@ -12,7 +12,7 @@ const speech = new RoomSpeech(window.speechSynthesis, window.SpeechSynthesisUtte
   if(status.state==='error')toast(status.message);
 });
 const tags = c => c.tags.map(t => `<span class="tag">${esc(t)}</span>`).join('');
-function toast(message) { const target=document.querySelector('dialog[open]')||document.body;target.append($('toast'));$('toast').textContent = message; $('toast').hidden = false; clearTimeout(toastTimer); toastTimer = setTimeout(() => $('toast').hidden = true, 5000); }
+function toast(message) { const target=[...document.querySelectorAll('dialog[open]')].at(-1)||document.body;target.append($('toast'));$('toast').textContent = message; $('toast').hidden = false; clearTimeout(toastTimer); toastTimer = setTimeout(() => $('toast').hidden = true, 5000); }
 function action(fn) { return (...args) => { try { return Promise.resolve(fn(...args)).catch(e => toast(e.message)); } catch(e) { toast(e.message); } }; }
 async function api(path, data) {
   const res = await fetch(path, data === undefined ? {} : {method:'POST', headers:{'Content-Type':'application/json','X-Character-Room':'1'},body:JSON.stringify(data)});
@@ -95,6 +95,7 @@ function renderChat() {
   $('profile-content').innerHTML = group ? groupProfile() : `${avatar(c)}<h2>${esc(c.name)}</h2><p class="subtitle">${esc(c.subtitle)}</p><div class="tags">${tags(c)}</div><h3>Their story</h3><p class="bio">${esc(c.background)}</p><p class="model-badge">${esc(c.model||state.settings.model)}${c.model?'':' · default'}</p>${c.specialty?`<h3>Task specialty</h3><p class="bio">${esc(c.specialty)}</p>`:''}${c.style ? `<h3>Their voice</h3><p class="bio">${esc(c.style)}</p>` : ''}${c.scenario ? `<h3>The scene</h3><p class="bio">${esc(c.scenario)}</p>` : ''}`;
   document.querySelectorAll('[data-member-edit]').forEach(b=>b.onclick=()=>openEditor(b.dataset.memberEdit));
   $('memory-input').value = activeChat.memory;
+  ToolUI.initChat(activeChat);
   renderMessages();
   const unanswered = !!activeChat.pending_round || activeChat.messages.at(-1)?.role === 'user';
   $('reply-error').hidden = !unanswered;
@@ -130,6 +131,7 @@ async function sendMessage(retry=false, override=null) {
     function consume(line) {
       if (!line.trim()) return;
       const event = JSON.parse(line);
+      if(event.type.startsWith('tool_'))ToolUI.live(event);
       if(event.type==='speaker'){
         if(!pending){pending=document.createElement('div');pending.className='message';$('messages').append(pending);}
         reply='';const c=state.characters.find(c=>c.id===event.character_id)||chatIdentity();
@@ -168,6 +170,7 @@ function openEditor(id=null) {
   populateVoices(c?.voice_uri||'');
   $('character-form').elements.namedItem('specialty').value=c?.specialty||'';
   loadCharacterModels(c?.model||'');
+  ToolUI.fillCharacter(c);
   $('character-dialog').showModal();
 }
 async function saveCharacter(event) {
@@ -175,6 +178,7 @@ async function saveCharacter(event) {
   try {
     if(imageLoading)throw new Error('Wait for the image preview before saving.');
     const data=Object.fromEntries(new FormData($('character-form'))); data.tags=data.tags.split(',').map(s=>s.trim()).filter(Boolean);
+    data.tool_ids=ToolUI.readPermissions();
     data.image_data=editorImage;data.speech_rate=Number(data.speech_rate);data.auto_read=$('auto-read').checked;
     await api('/api/characters' + (editingId ? '/' + editingId : ''),data);
     await loadState(); speech.stop(); $('character-dialog').close(); if (activeChat) renderChat(); toast('Character saved.');
@@ -217,6 +221,7 @@ function openGroupEditor(ids=[], title='', memory=''){
   if(!canLeave())return;speech.stop();selectedGroup=ids.slice();$('group-form').reset();
   $('group-form').elements.namedItem('title').value=title;
   $('group-form').elements.namedItem('memory').value=memory;
+  $('group-project-directory').value='';$('group-project-directory').disabled=!state.can_manage_tools;$('group-project-browse').disabled=!state.can_manage_tools;
   renderGroupChoices();$('group-dialog').showModal();
 }
 function renderGroupChoices(){
