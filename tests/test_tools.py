@@ -138,7 +138,48 @@ class ProjectToolTests(unittest.TestCase):
         app.urlopen=model
         self.request('/api/chats/'+self.chat_id+'/reply',{'message':'Try a disallowed tool'})
         self.assertFalse((self.root/'bad.txt').exists())
-        self.assertEqual(self.request('/api/chats/'+self.chat_id)['tool_events'][0]['status'],'failed')
+        records=self.request('/api/chats/'+self.chat_id)['tool_events']
+        self.assertTrue(any(r['operation']=='files_write__write_text' and r['status']=='failed' for r in records))
+
+    def test_unsupported_native_model_uses_json_tools_and_project_prompt(self):
+        self.grant('files_read','files_write')
+        original=app.urlopen;requests=[]
+        def model(req,timeout=None):
+            if isinstance(req,str):return original(req,timeout)
+            payload=json.loads(req.data);requests.append(payload)
+            self.assertIn('not fictional roleplay',payload['messages'][0]['content'])
+            self.assertIn('actual project read access',payload['messages'][0]['content'])
+            if 'tools' in payload:
+                raise urllib.error.HTTPError(req.full_url,400,'Bad Request',{},io.BytesIO(b'{"error":"model does not support tools"}'))
+            self.assertEqual(payload['format']['type'],'object')
+            self.assertFalse(any(m['role']=='tool' or 'tool_calls' in m for m in payload['messages']))
+            envelope={'tool_calls':[{'name':'files_write__write_text','arguments':{'path':'compatible.txt','content':'Real file'}}],'reply':''} if len(requests)==2 else {'tool_calls':[],'reply':'Created the real file.'}
+            return io.BytesIO((json.dumps({'message':{'content':json.dumps(envelope)},'done':True})+'\n').encode())
+        app.urlopen=model
+        events=self.request('/api/chats/'+self.chat_id+'/reply',{'message':'Create compatible.txt'})
+        self.assertEqual(events[-1]['type'],'done')
+        self.assertEqual((self.root/'compatible.txt').read_text(),'Real file')
+        self.assertEqual(''.join(e.get('text','') for e in events if e['type']=='token'),'Created the real file.')
+        self.assertTrue(any(e['type']=='tool_mode' for e in events))
+
+    def test_ollama_http_errors_show_the_actual_model_error(self):
+        self.grant('files_read')
+        original=app.urlopen
+        def model(req,timeout=None):
+            if isinstance(req,str):return original(req,timeout)
+            raise urllib.error.HTTPError(req.full_url,500,'Error',{},io.BytesIO(b'{"error":"model requires more system memory"}'))
+        app.urlopen=model
+        events=self.request('/api/chats/'+self.chat_id+'/reply',{'message':'Check files'})
+        self.assertEqual(events[-1]['type'],'error')
+        self.assertIn('model requires more system memory',events[-1]['error'])
+        self.assertTrue(any(e['type']=='tool_result' and e['status']=='success' for e in events))
+
+    def test_project_without_grants_uses_work_prompt_without_native_tools(self):
+        self.request('/api/chats/'+self.chat_id+'/reply',{'message':'Check files'})
+        payload=self.payloads[-1]
+        self.assertNotIn('tools',payload)
+        self.assertIn('not fictional roleplay',payload['messages'][0]['content'])
+        self.assertIn('No project tools',payload['messages'][0]['content'])
 
     def test_git_local_workflow_and_hooks_disabled(self):
         location=shutil.which('git')

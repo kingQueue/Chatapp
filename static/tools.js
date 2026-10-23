@@ -34,7 +34,7 @@ globalThis.ToolUI=(()=>{
     el('project-directory').value=chat.project_dir||'';
     const managed=!!state.can_manage_tools;
     el('project-directory').disabled=!managed;el('project-browse').disabled=!managed;el('project-save').disabled=!managed||busy;
-    el('project-status').textContent=chat.project_dir?'File tools are restricted to this project. Character permissions still apply.':'No project selected. Characters cannot use project tools.';
+    el('project-status').textContent=chat.project_dir?'Project work mode. Characters check actual read access before replying when permitted. File tools stay within this folder; character permissions still apply.':'No project selected. Characters cannot use project tools.';
     el('project-open-files').disabled=!chat.project_dir;el('project-open-parts').disabled=!chat.project_dir;
     el('tool-history-list').innerHTML=(chat.tool_events||[]).map(entry=>{
       let args={},result={};try{args=JSON.parse(entry.arguments);result=JSON.parse(entry.result);}catch{}
@@ -45,7 +45,7 @@ globalThis.ToolUI=(()=>{
   }
   function live(event){
     el('tool-live').hidden=false;
-    el('tool-live').textContent=event.type==='tool_start'?`${event.speaker_name} is using ${event.name}…`:event.type==='tool_thinking'?`${event.speaker_name} is reviewing the tool result…`:`${event.name}: ${event.status}${event.result?.error?' · '+event.result.error:''}`;
+    el('tool-live').textContent=event.type==='tool_mode'?`${event.speaker_name} is using compatibility mode for this model’s tool requests…`:event.type==='tool_start'?`${event.speaker_name} is using ${event.name}…`:event.type==='tool_thinking'?`${event.speaker_name} is reviewing the tool result…`:`${event.name}: ${event.status}${event.result?.error?' · '+event.result.error:''}`;
   }
   async function showFiles(path='.'){const result=await api(`/api/project/${activeChat.id}/list?path=${encodeURIComponent(path)}`);el('project-files-dialog').showModal();el('project-files-path').value=path;
     el('project-file-list').innerHTML=result.entries.map(entry=>`<div class="project-file-row"><button class="text-button" data-project-path="${escape(entry.path)}" data-project-kind="${entry.type}">${entry.type==='directory'?'▸':'▤'} ${escape(entry.path)}</button>${entry.type==='file'?`<a href="/api/project/${activeChat.id}/download?path=${encodeURIComponent(entry.path)}" download>Download</a>`:''}</div>`).join('')||'<p class="help">This folder is empty.</p>';
