@@ -61,6 +61,17 @@ class ProjectToolTests(unittest.TestCase):
             with self.subTest(path=path),self.assertRaises(ValueError):self.dispatch('files_write__write_text',{'path':path,'content':'bad'})
         self.assertEqual((self.outside/'secret.txt').read_text(),'outside data')
 
+    def test_absolute_paths_inside_project_are_normalized_without_widening_access(self):
+        self.grant('files_read','files_write')
+        spelling=str(self.root/'bob_test.txt')
+        if os.name=='nt':spelling=spelling.replace('\\','\\\\')
+        result=self.dispatch('files_write__write_text',{'path':spelling,'content':'Actual file write'})
+        self.assertEqual(result['path'],'bob_test.txt')
+        read=self.dispatch('files_read__read_text',{'path':str(self.root/'bob_test.txt')})
+        self.assertEqual(read['content'],'Actual file write')
+        for path in [str(self.root/'.git/config'),str(self.root/'../outside/secret.txt'),str(self.outside/'secret.txt')]:
+            with self.subTest(path=path),self.assertRaises(ValueError):self.dispatch('files_write__write_text',{'path':path,'content':'forbidden'})
+
     def test_hard_links_denied(self):
         self.grant('files_read','files_write')
         os.link(self.outside/'secret.txt',self.root/'linked.txt')
@@ -153,7 +164,7 @@ class ProjectToolTests(unittest.TestCase):
                 raise urllib.error.HTTPError(req.full_url,400,'Bad Request',{},io.BytesIO(b'{"error":"model does not support tools"}'))
             self.assertEqual(payload['format']['type'],'object')
             self.assertFalse(any(m['role']=='tool' or 'tool_calls' in m for m in payload['messages']))
-            envelope={'tool_calls':[{'name':'files_write__write_text','arguments':{'path':'compatible.txt','content':'Real file'}}],'reply':''} if len(requests)==2 else {'tool_calls':[],'reply':'Created the real file.'}
+            envelope={'tool_calls':[{'name':'files_write__write_text','arguments':{'path':str(self.root/'compatible.txt'),'content':'Real file'}}],'reply':''} if len(requests)==2 else {'tool_calls':[],'reply':'Created the real file.'}
             return io.BytesIO((json.dumps({'message':{'content':json.dumps(envelope)},'done':True})+'\n').encode())
         app.urlopen=model
         events=self.request('/api/chats/'+self.chat_id+'/reply',{'message':'Create compatible.txt'})
@@ -173,6 +184,26 @@ class ProjectToolTests(unittest.TestCase):
         self.assertEqual(events[-1]['type'],'error')
         self.assertIn('model requires more system memory',events[-1]['error'])
         self.assertTrue(any(e['type']=='tool_result' and e['status']=='success' for e in events))
+
+    def test_successful_write_survives_invalid_model_closing_response(self):
+        self.grant('files_write')
+        original=app.urlopen;count=0
+        def model(req,timeout=None):
+            nonlocal count
+            if isinstance(req,str):return original(req,timeout)
+            payload=json.loads(req.data)
+            if 'tools' in payload:raise urllib.error.HTTPError(req.full_url,400,'Bad Request',{},io.BytesIO(b'{"error":"model does not support tools"}'))
+            count+=1
+            content=json.dumps({'tool_calls':[{'name':'files_write__write_text','arguments':{'path':str(self.root/'bob_test.txt'),'content':'Verified'}}],'reply':''}) if count==1 else '{"reply":"unfinished'
+            return io.BytesIO((json.dumps({'message':{'content':content},'done':True})+'\n').encode())
+        app.urlopen=model
+        events=self.request('/api/chats/'+self.chat_id+'/reply',{'message':'Create bob_test.txt'})
+        self.assertEqual(events[-1]['type'],'done')
+        self.assertEqual(count,3)
+        self.assertEqual((self.root/'bob_test.txt').read_text(),'Verified')
+        final=self.request('/api/chats/'+self.chat_id)['messages'][-1]['content']
+        self.assertIn('App verification:',final);self.assertIn('bob_test.txt',final)
+        self.assertIn('other requested work may remain',final)
 
     def test_project_without_grants_uses_work_prompt_without_native_tools(self):
         self.request('/api/chats/'+self.chat_id+'/reply',{'message':'Check files'})

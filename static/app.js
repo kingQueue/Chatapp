@@ -104,9 +104,19 @@ function renderChat() {
   $('send-button').disabled = unanswered;
 }
 function formatMessage(text) { return esc(text).replace(/\*([^*\n]+)\*/g, '<em>$1</em>'); }
+function toolReceiptHTML(message) {
+  if(message.role!=='assistant'||!activeChat.project_dir||!message.round_id)return '';
+  const records=(activeChat.tool_events||[]).filter(e=>e.round_id===message.round_id&&e.character_id===message.character_id);
+  const wrote=records.some(e=>e.status==='success'&&/__(write_text|parts_write|cad_create)$/.test(e.operation));
+  return `<div class="app-tool-receipt"><strong>App-verified tool record</strong><ul>${records.map(e=>{
+    let args={},result={};try{args=JSON.parse(e.arguments);result=JSON.parse(e.result);}catch{}
+    const detail=e.status==='success'?(result.path||result.opened||args.output||args.path||args.action||''):result.error||e.status;
+    return `<li>${e.status==='success'?'✓':'!'} ${esc(e.operation)} · ${esc(detail)}${e.status==='success'&&result.entries?` · ${result.entries.length} entries`:''}</li>`;
+  }).join('')}</ul>${wrote?'':'<span>No successful file writes recorded for this reply.</span>'}</div>`;
+}
 function messageHTML(message, index) {
   const c = messageCharacter(message), user = message.role === 'user';
-  return `<div class="message ${user ? 'user' : ''}">${user ? '' : avatar(c,'tiny')}<div class="message-body"><p class="message-label">${user ? 'You' : esc(message.speaker_name||c.name)}${!user&&message.model?`<span class="message-model">${esc(message.model)}</span>`:''}</p><div class="message-text">${formatMessage(message.content)}</div>${user ? '' : `<button class="text-button read-aloud" data-read="${index}" aria-label="Read reply ${index+1} aloud">▷ Read aloud</button>`}</div></div>`;
+  return `<div class="message ${user ? 'user' : ''}">${user ? '' : avatar(c,'tiny')}<div class="message-body"><p class="message-label">${user ? 'You' : esc(message.speaker_name||c.name)}${!user&&message.model?`<span class="message-model">${esc(message.model)}</span>`:''}</p><div class="message-text">${formatMessage(message.content)}</div>${toolReceiptHTML(message)}${user ? '' : `<button class="text-button read-aloud" data-read="${index}" aria-label="Read reply ${index+1} aloud">▷ Read aloud</button>`}</div></div>`;
 }
 function renderMessages() { $('messages').innerHTML = activeChat.messages.map(messageHTML).join(''); document.querySelectorAll('[data-read]').forEach(button=>button.onclick=action(()=>speech.speak(activeChat.messages[Number(button.dataset.read)].content,messageCharacter(activeChat.messages[Number(button.dataset.read)])))); scrollMessages(); }
 function scrollMessages() { $('messages').scrollTop = $('messages').scrollHeight; }

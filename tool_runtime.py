@@ -62,9 +62,17 @@ def scoped(root, relative='.', allow_directory=False):
     if not isinstance(relative, str) or len(relative) > 500 or '\x00' in relative:
         raise ValueError('Use a relative project path.')
     normalized = relative.replace('\\', '/')
+    # Models often repeat the full folder the user supplied. Accept that spelling
+    # only when it is lexically inside this exact project; still inspect every
+    # component below for links, protected metadata, traversal and hard links.
+    if Path(relative).is_absolute():
+        try:
+            normalized=Path(relative).relative_to(root).as_posix()
+        except ValueError:
+            raise ValueError('That path is outside the assigned project. Use a project-relative filename, for example bob_test.txt.')
     windows = PureWindowsPath(relative)
-    if normalized.startswith('/') or windows.drive or ':' in normalized or '..' in normalized.split('/'):
-        raise ValueError('Paths must stay inside the assigned project directory.')
+    if normalized.startswith('/') or (windows.drive and not Path(relative).is_absolute()) or ':' in normalized or '..' in normalized.split('/'):
+        raise ValueError('Paths must stay inside the assigned project directory. Use a relative filename such as bob_test.txt, without drive letters or parent traversal.')
     parts = [p for p in normalized.split('/') if p not in ('', '.')]
     for part in parts:
         base = part.split('.')[0].upper()
