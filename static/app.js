@@ -107,7 +107,7 @@ function formatMessage(text) { return esc(text).replace(/\*([^*\n]+)\*/g, '<em>$
 function toolReceiptHTML(message) {
   if(message.role!=='assistant'||!activeChat.project_dir||!message.round_id)return '';
   const records=(activeChat.tool_events||[]).filter(e=>e.round_id===message.round_id&&e.character_id===message.character_id);
-  const wrote=records.some(e=>e.status==='success'&&/__(write_text|parts_write|cad_create)$/.test(e.operation));
+  const wrote=records.some(e=>{if(e.status!=='success')return false;let result={};try{result=JSON.parse(e.result);}catch{}return result.written===true||/__(write_text|parts_write|cad_create)$/.test(e.operation);});
   return `<div class="app-tool-receipt"><strong>App-verified tool record</strong><ul>${records.map(e=>{
     let args={},result={};try{args=JSON.parse(e.arguments);result=JSON.parse(e.result);}catch{}
     const detail=e.status==='success'?(result.path||result.opened||args.output||args.path||args.action||''):result.error||e.status;

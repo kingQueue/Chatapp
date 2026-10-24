@@ -407,7 +407,7 @@ class Handler(BaseHTTPRequestHandler):
             if path == '/api/network':
                 return self.output(network_status(include_code=not getattr(self.server, 'is_lan', False)))
             if path == '/api/health':
-                return self.output({'app': 'character-room', 'version': 6})
+                return self.output({'app': 'character-room', 'version': 7})
             if path == '/api/tools':
                 return self.output({'tools':TOOLS.registry(), 'adapters':{key:value[0] for key,value in tool_runtime.ADAPTERS.items()}, 'can_manage':not getattr(self.server,'is_lan',False)})
             if path == '/api/state':
@@ -690,7 +690,7 @@ class Handler(BaseHTTPRequestHandler):
             payload['messages'][0]['content'] += '\nNo project tools are currently available to this character. Explain missing grants or unconfigured application locations when asked to access files. Do not pretend to check files.'
         final='';calls_used=0;invalid_retries=0;outcomes=[]
         def verified_closing():
-            writes=[(name,result) for name,result in outcomes if 'error' not in result and name.endswith(('__write_text','__parts_write','__cad_create'))]
+            writes=[(name,result) for name,result in outcomes if 'error' not in result and (result.get('written') is True or name.endswith(('__write_text','__parts_write','__cad_create')))]
             if not writes:return None
             details='; '.join(name+': '+str(result.get('path') or result.get('files') or result.get('output') or result) for name,result in writes)
             return 'App verification: '+details+'. These operations completed successfully. The model could not finish a valid closing response; other requested work may remain. See the app-verified tool record for exact results.'

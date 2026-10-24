@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 import urllib.error
@@ -247,6 +248,62 @@ class ProjectToolTests(unittest.TestCase):
             with self.assertRaises(ValueError):runtime.cad_spec(self.root,args)
         outputs,shapes=runtime.cad_spec(self.root,{'output':'models/demo','shapes':[{'type':'box','length':20,'width':10,'height':4},{'type':'cylinder','radius':2,'height':6,'x':5,'y':5,'z':-1,'operation':'cut'}]})
         self.assertTrue(outputs['fcstd'].is_relative_to(self.root));self.assertEqual(shapes[1]['operation'],'cut')
+
+    def register_parts_cli(self):
+        source=Path(self.folder.name)/'partmap';source.mkdir()
+        for name in ['index.html','app.js','style.css']:(source/name).write_text('test',encoding='utf-8')
+        app.TOOLS.save_registry({'id':'partmap','adapter':'partmap','name':'Parts CLI','location':str(source),'enabled':True})
+        self.grant('partmap')
+        project={'name':'Rover – CLI','nodes':[{'id':'board','name':'ESP32','category':'board','quantity':1,'parent':None,'pins':[{'name':'GPIO1'}]},{'id':'motor','name':'Motor','category':'motor','quantity':2,'parent':'board','connections':[{'target':'board','local':'signal','remote':'GPIO1'}]}]}
+        receipt=self.dispatch('partmap__parts_write',{'path':'parts.json','project':project})
+        self.assertTrue(receipt['verified'])
+        return project
+
+    def test_parts_cli_analyze_validate_and_export_through_dispatcher(self):
+        self.register_parts_cli()
+        report=self.dispatch('partmap__custom_app_run',{'command':'analyze','args':['--path','parts.json']})
+        self.assertEqual(report['part_count'],2);self.assertEqual(report['total_units'],3)
+        self.assertEqual(report['connections'][0]['target'],'board')
+        self.assertTrue(self.dispatch('partmap__custom_app_run',{'command':'validate'})['valid'])
+        for format,suffix in [('csv','csv'),('markdown','md'),('json','json')]:
+            result=self.dispatch('partmap__custom_app_run',{'command':'export','args':['--format',format,'--output','exports/parts.'+suffix]})
+            self.assertTrue((self.root/result['path']).exists())
+        self.assertIn('GPIO1',(self.root/'exports/parts.md').read_text(encoding='utf-8'))
+        with self.assertRaises(ValueError):self.dispatch('partmap__custom_app_run',{'command':'export','args':['--format','csv','--output','exports/parts.csv']})
+        self.assertEqual(self.dispatch('partmap__parts_read',{'path':'parts.json'})['project']['name'],'Rover – CLI')
+
+    def test_parts_cli_rejects_workspace_override_shell_and_external_paths(self):
+        self.register_parts_cli()
+        attempts=[{'command':'shell','args':['whoami']},{'command':'write','args':[]},{'command':'validate','args':['--workspace',str(self.outside)]},{'command':'validate','args':['--path',str(self.outside/'secret.txt')]},{'command':'export','args':['--output','../outside/leak.txt']},{'command':'export','args':['--output','.git/config']},{'command':'export','args':['--output','parts.json']},{'command':'analyze','args':['--unknown','value']}]
+        for args in attempts:
+            with self.subTest(args=args),self.assertRaises(ValueError):self.dispatch('partmap__custom_app_run',args)
+        self.grant()
+        with self.assertRaises(ValueError):self.dispatch('partmap__custom_app_run',{'command':'analyze'})
+        self.assertEqual((self.outside/'secret.txt').read_text(),'outside data')
+
+    def test_parts_cli_standalone_returns_machine_readable_json(self):
+        self.register_parts_cli()
+        command=[sys.executable,'-I',str(Path(runtime.__file__).with_name('parts_cli.py')),'--workspace',str(self.root)]
+        result=subprocess.run(command+['validate','--path','parts.json'],capture_output=True)
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertTrue(json.loads(result.stdout)['result']['valid'])
+        invalid=subprocess.run(command+['export','--output','../outside/leak.json'],capture_output=True)
+        self.assertNotEqual(invalid.returncode,0)
+        self.assertFalse(json.loads(invalid.stdout)['ok'])
+
+    def test_parts_cli_model_call_executes_and_is_audited(self):
+        self.register_parts_cli();original=app.urlopen;count=0
+        def model(req,timeout=None):
+            nonlocal count
+            if isinstance(req,str):return original(req,timeout)
+            count+=1
+            if count==1:return io.BytesIO((json.dumps({'message':{'tool_calls':[{'function':{'name':'partmap__custom_app_run','arguments':{'command':'export','args':['--format','markdown','--output','handoff.md']}}}]},'done':True})+'\n').encode())
+            return original(req,timeout)
+        app.urlopen=model
+        events=self.request('/api/chats/'+self.chat_id+'/reply',{'message':'Export our parts handoff'})
+        self.assertEqual(events[-1]['type'],'done')
+        self.assertTrue((self.root/'handoff.md').exists())
+        self.assertEqual(self.request('/api/chats/'+self.chat_id)['tool_events'][0]['operation'],'partmap__custom_app_run')
 
     def test_pc_only_registry_and_project_changes(self):
         self.server.is_lan=True;app.NETWORK_CODE='TEST-CODE'

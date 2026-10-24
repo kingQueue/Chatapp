@@ -8,6 +8,7 @@ import re
 import shutil
 import stat
 import subprocess
+import sys
 import threading
 import uuid
 
@@ -18,7 +19,8 @@ ADAPTERS = {
     'vscode': ('Visual Studio Code', [('open_editor', 'Open an existing project file in VS Code. Code editing uses write_text.', {'path': 'string'})]),
     'git': ('Local Git', [('git', 'Local project Git only. Actions: status, diff, log, init, stage, commit. Stage requires explicit file paths; commit requires a message. No remote, hooks, shell, checkout, or delete actions.', {'action': 'string', 'paths': 'array', 'message': 'string'})]),
     'partmap': ('Partmap hardware studio', [('parts_read', 'Read a project-local Partmap JSON file; includes parts, hierarchy and wiring.', {'path': 'string'}),
-                                          ('parts_write', 'Create/update a Partmap project JSON with name and nodes. Existing files require expected_sha256 from parts_read. Categories: board,sensor,motor,power,peripheral,printed,fastener,mechanical.', {'path': 'string', 'project': 'object', 'expected_sha256': 'string'})]),
+                                          ('parts_write', 'Create/update a Partmap project JSON with name and nodes through its CLI. Each node needs id,name,category,quantity,parent. Existing files require expected_sha256 from parts_read. Categories: board,sensor,motor,power,peripheral,printed,fastener,mechanical.', {'path': 'string', 'project': 'object', 'expected_sha256': 'string'}),
+                                          ('custom_app_run', 'Run the Partmap CLI. Commands: validate, analyze, export. args is an array of separate option strings. Examples: ["--path","parts.json"]; export: ["--path","parts.json","--format","csv","--output","exports/parts.csv"]. Paths stay inside the project. Existing exports require --expected-sha256. No shell or other programs.', {'command':'string','args':'array'})]),
     'freecad': ('FreeCAD modeling', [('cad_create', 'Create parametric FreeCAD, STEP and STL models from a declarative shape list. Shapes: box(length,width,height), cylinder(radius,height), sphere(radius), cone(radius,radius2,height). Optional x,y,z,rx,ry,rz; operation add or cut. Units mm/degrees. First shape must add. Output is a new relative stem, e.g. models/bracket. Never pass Python code.', {'output': 'string', 'shapes': 'array'})]),
 }
 BLOCKED = {'.git', '.hg', '.svn', '.vscode', '.idea', '.ssh', '.aws', '.codex', '.agents', '__pycache__', '.character-room'}
@@ -201,6 +203,30 @@ def executable(location):
     if not path.is_absolute() or not path.is_file() or (os.name == 'nt' and path.suffix.lower() != '.exe'):
         raise ValueError('Configure the absolute path to the installed executable (.exe), not a shell script or command line.')
     return str(path.resolve())
+
+
+def partmap_cli(root, command, arguments=None, argv=None):
+    """Only this fixed, bundled CLI can be launched by the Partmap adapter."""
+    if command not in ('read','write','validate','analyze','export'): raise ValueError('Unknown Partmap CLI command.')
+    python = Path(sys.executable)
+    if python.stem.lower() == 'pythonw': python = python.with_name('python.exe')
+    command_line = [str(python), '-I', str(Path(__file__).with_name('parts_cli.py')), '--workspace', str(root)]
+    if argv is None:
+        command_line.append('--request'); request = json.dumps({'command':command,'arguments':arguments},ensure_ascii=False)
+    else:
+        if command not in ('validate','analyze','export'): raise ValueError('custom_app_run only allows validate, analyze, or export.')
+        if not isinstance(argv,list) or len(argv)>30 or any(not isinstance(a,str) or len(a)>1000 or '\x00' in a for a in argv):raise ValueError('Supply up to 30 separate CLI argument strings.')
+        # Application-wide options can never be supplied through model arguments.
+        if any(a.split('=',1)[0] in ('--workspace','--request','--help','-h') for a in argv): raise ValueError('The dispatcher selects the workspace and request mode.')
+        command_line += [command] + argv; request=''
+    env = {k:v for k,v in os.environ.items() if not k.upper().startswith('PYTHON')}
+    result = subprocess.run(command_line, cwd=root, input=request.encode('utf-8'), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            timeout=30, env=env, creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
+    if len(result.stdout)>1500000:raise ValueError('Partmap CLI result is too large.')
+    try: response=json.loads(result.stdout.decode('utf-8'))
+    except (ValueError,UnicodeDecodeError):raise ValueError('Partmap CLI returned an invalid response: '+result.stderr.decode('utf-8','replace')[-2000:])
+    if result.returncode or not response.get('ok'):raise ValueError(response.get('error','Partmap CLI failed.'))
+    return response['result']
 
 def run(command, cwd, timeout=30, env=None):
     result = subprocess.run(command, cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -411,10 +437,11 @@ class ToolService:
         for tool in self.available(character_id,chat):
             for operation,description,args in ADAPTERS[tool['adapter']][1]:
                 properties={key:{'type':value} for key,value in args.items()}
-                for key in ('paths',):
+                for key in ('paths','args'):
                     if key in properties: properties[key]['items']={'type':'string'}
                 if 'shapes' in properties: properties['shapes']['items']={'type':'object'}
-                required={'list_files':[], 'read_text':['path'], 'write_text':['path','content'], 'open_editor':['path'], 'git':['action'], 'parts_read':['path'], 'parts_write':['path','project'], 'cad_create':['output','shapes']}[operation]
+                if operation=='custom_app_run':properties['command']['enum']=['validate','analyze','export']
+                required={'list_files':[], 'read_text':['path'], 'write_text':['path','content'], 'open_editor':['path'], 'git':['action'], 'parts_read':['path'], 'parts_write':['path','project'], 'custom_app_run':['command'], 'cad_create':['output','shapes']}[operation]
                 result.append({'type':'function','function':{'name':tool['id']+'__'+operation,'description':description,'parameters':{'type':'object','properties':properties,'required':required,'additionalProperties':False}}})
         return result
 
@@ -438,9 +465,9 @@ class ToolService:
                 return {'opened':str(target.relative_to(root)), 'application':'VS Code'}
             if operation=='git': return git_action(root,tool['location'],args,self.private)
             if operation=='parts_read':
-                result=read_text(root,args.get('path'),whole=True);result['project']=validate_parts(json.loads(result.pop('content')));return result
+                return partmap_cli(root,'read',{'path':args.get('path')})
             if operation=='parts_write':
-                if not str(args.get('path','')).lower().endswith('.json'):raise ValueError('Use a .json file for Partmap projects.')
-                project=validate_parts(args.get('project'));return write_text(root,args.get('path'),json.dumps(project,indent=2),args.get('expected_sha256',''))
+                return partmap_cli(root,'write',{'path':args.get('path'),'project':args.get('project'),'expected_sha256':args.get('expected_sha256','')})
+            if operation=='custom_app_run':return partmap_cli(root,args.get('command'),argv=args.get('args',[]))
             if operation=='cad_create':return cad_create(root,tool['location'],args,self.private)
         raise ValueError('Unknown tool operation.')
