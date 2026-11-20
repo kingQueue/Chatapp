@@ -1,0 +1,11 @@
+# Editable starting point for 24–32 GB VRAM and 64 GB system RAM.
+# Actual usage depends on the base model, context and installed backend.
+training:
+  quantization: 4bit
+  batch_size: 1
+  gradient_accumulation_steps: 8
+  epochs: 3
+  lora:
+    r: 16
+data:
+  max_length: 2048

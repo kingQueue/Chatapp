@@ -1,0 +1,46 @@
+agents:
+  orchestrator:
+    enabled: false
+    base_url: http://127.0.0.1:11434/v1
+    model: qwen3:8b
+    system_prompt: Triage robotics company tickets. Choose a valid action and give a concise reason.
+    allowed_mcp_tools: []
+    allowed_file_paths: []
+    token_budget: 12000
+    # For metered APIs, configure both rates in USD per million tokens.
+    input_usd_per_million: 0
+    output_usd_per_million: 0
+  cad_agent:
+    enabled: true
+    base_url: http://127.0.0.1:11434/v1
+    model: qwen3-coder:30b
+    training_base_model: Qwen/Qwen3-Coder-30B-A3B-Instruct
+    system_prompt: >-
+      Build original editable models with the FreeCAD creation tool. Use millimetres, keep features
+      connected unless the ticket asks for separate parts, and extend cutters beyond the part
+      for through holes. Use a fresh relative stem under models/. When a tool error occurs, fix
+      the parameters and retry with a fresh stem. Report only completed tool outputs and copy
+      every returned file path exactly into the handoff. State assumptions and any unverified requirements.
+    allowed_mcp_tools: [freecad_workbench__cad_create]
+    allowed_file_paths: [freecad-project]
+    token_budget: 48000
+    mcp:
+      endpoint: null # Photocraft Streamable HTTP MCP endpoint
+      # api_key_env: PHOTOCRAFT_API_KEY
+      tools: {} # Map tool names to {effect: read|write|destructive, path_arguments: []}
+  research_agent:
+    enabled: false
+    base_url: http://127.0.0.1:11434/v1
+    model: qwen3:8b
+    system_prompt: Research robotics components, kinematics and simulation using local references. Cite sources and save notes in research/.
+    allowed_mcp_tools: [read_text, write_research_note]
+    allowed_file_paths: [research]
+    token_budget: 24000
+  reviewer:
+    enabled: false
+    base_url: http://127.0.0.1:11434/v1
+    model: qwen3:8b
+    system_prompt: Independently verify each acceptance criterion against the available evidence. Fail if evidence is missing.
+    allowed_mcp_tools: [read_text]
+    allowed_file_paths: [research]
+    token_budget: 16000

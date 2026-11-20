@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Tickets · Character Room</title>
+  <style nonce="{{NONCE}}">
+    :root{color-scheme:dark;font-family:system-ui,sans-serif;background:#11141b;color:#eeeeF6}
+    body{margin:0;min-height:100dvh;display:grid;place-items:center}
+    .login{width:min(100% - 3rem,26rem);box-sizing:border-box;border:1px solid #39364b;border-radius:1.25rem;background:#191c27;padding:1.75rem}
+    .login p{color:#aeb0c3}.login h1{margin:.25rem 0 1.25rem}.login label{display:grid;gap:.5rem}
+    .login input,.login button{font:inherit;padding:.75rem;border-radius:.65rem;border:1px solid #49455d}
+    .login input{background:#10131b;color:#fff}.login button{margin-top:1rem;width:100%;background:#c4b5fd;color:#201638;font-weight:700;cursor:pointer}
+    .login [role=status]{color:#ffb4b5;min-height:1.5em;margin-bottom:0}
+    .login nav{display:flex;gap:1rem;margin-bottom:1.25rem}
+    .login nav a{color:#c4b5fd}
+    .login nav [aria-current]{color:#eeeef6;font-weight:700}
+  </style>
+</head>
+<body>
+  <main class="login">
+    <nav aria-label="Character Room sections">
+      <a href="/">Characters</a>
+      <a href="/tickets/" aria-current="page">Tickets</a>
+    </nav>
+    <p>Character Room</p>
+    <h1>Tickets</h1>
+    <form>
+      <label>Ticket access token
+        <input type="password" name="token" required autocomplete="current-password" autocapitalize="none" spellcheck="false">
+      </label>
+      <button type="submit">Unlock tickets</button>
+      <p role="status"></p>
+    </form>
+  </main>
+  <script nonce="{{NONCE}}">
+    const nonce = document.currentScript.nonce;
+    const form = document.querySelector("form");
+    const loginStyle = document.querySelector("head style");
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const status = form.querySelector("[role=status]");
+      const button = form.querySelector("button");
+      const token = form.elements.token.value.trim();
+      const api = (path, options = {}) => fetch(new URL(path, location.href), {
+        ...options, credentials: "same-origin", cache: "no-store",
+        headers: {...options.headers, Authorization: "Bearer " + token},
+      });
+      button.disabled = true;
+      status.textContent = "";
+      try {
+        const page = await api("ui");
+        if (page.status === 401) throw new Error("The access token was rejected.");
+        const [js, css] = await Promise.all([api("ui.js"), api("ui.css")]);
+        if (![page, js, css].every(response => response.ok)) throw new Error("The ticket service could not load.");
+        const [html, source, styling] = await Promise.all([page.text(), js.text(), css.text()]);
+        const template = document.createElement("template");
+        template.innerHTML = html;
+        if (!template.content.querySelector("#workspace")) throw new Error("The ticket view was unavailable.");
+        const style = document.createElement("style");
+        style.nonce = nonce;
+        style.textContent = styling;
+        document.head.append(style);
+        loginStyle.remove();
+        document.body.replaceChildren(template.content);
+        const script = document.createElement("script");
+        script.nonce = nonce;
+        script.textContent = source;
+        document.body.append(script);
+        window.startTicketBoard(api);
+        delete window.startTicketBoard;
+      } catch (error) {
+        if (status.isConnected) status.textContent = error.message;
+        else document.body.replaceChildren(document.createTextNode("Unable to open Tickets. Reload to try again."));
+      } finally {
+        button.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>

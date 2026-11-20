@@ -5,7 +5,10 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
     Start-Process powershell.exe -Verb RunAs -WindowStyle Hidden -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $PSCommandPath + '"')) -Wait
     exit
 }
-$pythonPath = (Get-Command python.exe).Source
+$runtimeFile = Join-Path $PSScriptRoot 'ticketing-python.txt'
+$pythonPath = if (Test-Path -LiteralPath $runtimeFile) {
+    (Get-Content -LiteralPath $runtimeFile -Raw -Encoding UTF8).Trim()
+} else { (Get-Command python.exe).Source }
 $config = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'data/network.json') -Raw | ConvertFrom-Json
 $address = [string]$config.address
 if (-not $config.enabled -or -not $address -or -not (Get-NetIPAddress -IPAddress $address -ErrorAction SilentlyContinue)) {
@@ -16,6 +19,7 @@ $pythonWindowless = Join-Path (Split-Path $pythonPath) 'pythonw.exe'
 if (Test-Path -LiteralPath $pythonWindowless) { $programs += $pythonWindowless }
 foreach ($program in $programs) {
     $ruleName = 'CharacterRoom-LocalNetwork-8766-' + [IO.Path]::GetFileNameWithoutExtension($program) + '-' + $address.Replace('.', '-')
+    if (Test-Path -LiteralPath $runtimeFile) { $ruleName += '-embedded' }
     if (-not (Get-NetFirewallRule -Name $ruleName -ErrorAction SilentlyContinue)) {
         New-NetFirewallRule -Name $ruleName -DisplayName 'Character Room - local subnet phone access' -Direction Inbound -Action Allow -Protocol TCP -LocalPort 8766 -LocalAddress $address -Profile Private,Public -RemoteAddress LocalSubnet -Program $program | Out-Null
     }

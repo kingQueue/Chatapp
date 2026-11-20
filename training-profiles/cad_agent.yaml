@@ -1,0 +1,16 @@
+# Qwen/Qwen3-Coder-30B-A3B-Instruct. Use a verified GPU training runtime.
+backend: transformers
+data:
+  max_length: 1536
+  val_split: 0.1
+training:
+  quantization: 4bit
+  stream_layers: true
+  stream_source: auto
+  batch_size: 1
+  gradient_accumulation_steps: 4
+  epochs: 2
+  lr: 0.0001
+  lora:
+    r: 8
+    alpha: 16

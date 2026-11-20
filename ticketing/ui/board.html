@@ -1,0 +1,93 @@
+<div id="workspace">
+  <header class="masthead">
+    <div class="brand"><span class="brand-icon" aria-hidden="true">▦</span><div><p>Character Room</p><h1>Tickets</h1></div></div>
+    <button id="lock" type="button" class="quiet">Lock</button>
+  </header>
+  <nav class="room-links" aria-label="Character Room sections">
+    <a href="/">Characters</a>
+    <a href="/tickets/" aria-current="page">Tickets</a>
+  </nav>
+  <nav class="tabs" aria-label="Ticket workspace">
+    <button data-view="board" type="button" aria-current="page">Board</button>
+    <button data-view="inbox" type="button">Needs human <span id="inbox-count"></span></button>
+    <button data-view="training" type="button">Training</button>
+  </nav>
+  <main>
+    <p id="notice" role="status" aria-live="polite" hidden></p>
+    <section id="board" class="page">
+      <div class="section-head">
+        <div><h2>Ticket board</h2><p id="dispatch-status"></p></div>
+        <button id="new-ticket" type="button" class="primary">＋ New ticket</button>
+      </div>
+      <div class="filters">
+        <label>Status<select id="filter"><option value="">All statuses</option></select></label>
+        <label>Search<input id="search" type="search" placeholder="Title, ID or assignee"></label>
+      </div>
+      <div id="columns" class="columns" aria-label="Kanban board"></div>
+    </section>
+    <section id="inbox" class="page" hidden>
+      <div class="section-head"><div><h2>Needs human</h2><p>Review agent requests and escalated tickets.</p></div></div>
+      <h3>Tool approvals</h3><div id="approvals" class="stack"></div>
+      <h3>Escalated tickets</h3><div id="escalated" class="stack"></div>
+    </section>
+    <section id="training" class="page" hidden>
+      <div class="section-head"><div><h2>Training</h2><p>Export reviewed runs and fine-tune an agent with Soup.</p></div></div>
+      <form id="training-form" class="panel stack">
+        <div class="form-grid">
+          <label>Agent<select name="agent" required></select></label>
+          <label>Base model<input name="base_model" placeholder="Qwen/Qwen2.5-7B-Instruct" maxlength="200" required></label>
+        </div>
+        <label>Dataset<select name="dataset" required></select></label>
+        <div class="actions">
+          <button id="export" type="button">Export reviewed runs</button>
+          <button id="download" type="button">Download dataset</button>
+          <button type="submit" value="validate">Validate setup</button>
+          <button type="submit" class="primary">Start training</button>
+        </div>
+      </form>
+      <h3>Training jobs</h3><div id="jobs" class="stack"></div>
+      <section id="job-detail" class="panel" hidden>
+        <div class="section-head"><div><h3>Training log</h3><p id="job-state" role="status"></p></div><button id="cancel-job" type="button">Cancel training</button></div>
+        <p id="model-output"></p><pre id="training-log" tabindex="0"></pre>
+      </section>
+    </section>
+  </main>
+</div>
+<dialog id="ticket-dialog" aria-labelledby="editor-heading">
+  <div class="dialog-head"><div><p id="ticket-reference"></p><h2 id="editor-heading"></h2></div><button id="close-editor" type="button" aria-label="Close ticket">✕</button></div>
+  <form id="ticket-form" class="stack">
+    <label>Title<input name="title" required maxlength="200"></label>
+    <label>Description<textarea name="description" rows="4" maxlength="40000"></textarea></label>
+    <div class="form-grid">
+      <label>Type<select name="type"><option>research</option><option>design</option><option>code</option><option>sim</option><option>review</option></select></label>
+      <label id="status-control">Status<select name="status"></select></label>
+      <label>Assignee<select name="assignee"></select></label>
+      <label>Parent ticket<input name="parent_id" placeholder="T-0001" maxlength="24"></label>
+    </div>
+    <label>Dependencies <small>One ticket ID per line</small><textarea name="depends_on" rows="2"></textarea></label>
+    <label>Inputs <small>One per line</small><textarea name="inputs" rows="2"></textarea></label>
+    <label>Outputs <small>One per line</small><textarea name="outputs" rows="2"></textarea></label>
+    <label>Acceptance criteria <small>One per line</small><textarea name="acceptance" rows="3"></textarea></label>
+    <details id="metadata"><summary>Ticket metadata</summary>
+      <div class="form-grid metadata">
+        <label>Ticket ID<input name="id" maxlength="24"></label>
+        <label>Attempts<input name="attempts" type="number" min="0" max="3"></label>
+        <label>Tokens<input name="tokens" type="number" min="0"></label>
+        <label>Cost (USD)<input name="token_cost" type="number" min="0" step="any"></label>
+        <label>Created <small>ISO 8601 with time zone</small><input name="created"></label>
+        <label>Updated <small>ISO 8601 with time zone</small><input name="updated"></label>
+      </div>
+    </details>
+    <p id="editor-message" class="message" role="status" hidden></p>
+    <div class="actions">
+      <button id="triage" type="button">Queue triage</button>
+      <button id="escalate-active" type="button">Escalate to human</button>
+      <button id="save-ticket" type="submit" class="primary">Save ticket</button>
+    </div>
+  </form>
+  <div id="records" class="stack">
+    <details><summary>Ticket history</summary><div id="history" class="stack records"></div></details>
+    <details id="logs-panel"><summary>Agent run logs</summary><div id="run-logs" class="stack records"></div></details>
+    <button id="reload-ticket" type="button" class="quiet">Reload ticket and logs</button>
+  </div>
+</dialog>

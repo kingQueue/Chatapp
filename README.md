@@ -2,6 +2,8 @@
 
 A small, private character chat app that runs on your PC. No npm install, Python packages, accounts, or API keys are needed.
 
+The optional **Tickets** tab adds local agent dispatch, review, training and FreeCAD work to Character Room on the same port. Follow the [Tickets setup](TICKETS.md) for its Python environment and token, and see [FreeCAD Designer](FREECAD.md) to configure the CAD character.
+
 ## Open the app
 
 Double-click **Start Character Room.cmd** in this folder. It starts the local server, starts Ollama if needed, and opens http://127.0.0.1:8765 in your browser. Clicking the launcher again opens the existing app.

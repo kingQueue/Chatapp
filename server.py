@@ -21,6 +21,7 @@ from urllib.request import Request, urlopen
 from http.cookies import SimpleCookie
 from urllib.parse import urlsplit, parse_qs
 import tool_runtime
+import ticket_embed
 
 ROOT = Path(__file__).resolve().parent
 DB_PATH = ROOT / 'data' / 'character-room.sqlite3'
@@ -394,6 +395,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header('Content-Length',str(len(raw)));self.end_headers();self.wfile.write(raw)
 
     def do_GET(self):
+        if ticket_embed.handle(self):
+            return
         if not self.valid_host():
             return self.output({'error': 'Invalid host'}, 403)
         try:
@@ -455,7 +458,13 @@ class Handler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError):
             pass
 
+    def do_PUT(self):
+        if not ticket_embed.handle(self):
+            self.send_error(501, 'Unsupported method')
+
     def do_POST(self):
+        if ticket_embed.handle(self):
+            return
         origin = self.headers.get('Origin')
         allowed = (f"http://{self.headers.get('Host')}",)
         if not self.valid_host() or (origin and origin not in allowed) or self.headers.get('X-Character-Room') != '1':
@@ -938,22 +947,23 @@ def main():
     start_ollama()
     server = ThreadingHTTPServer(('127.0.0.1', args.port), Handler)
     server.daemon_threads = True
-    try:
-        config = json.loads((DB_PATH.parent / 'network.json').read_text(encoding='utf-8'))
-        if config.get('enabled'):
-            set_network(True, persist=False, address=config.get('address') or None)
-    except (OSError, ValueError):
-        pass
-    print(f'Character Room is running at {url}', flush=True)
-    if args.open:
-        webbrowser.open(url)
-    try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        pass
-    finally:
-        set_network(False, persist=False)
-        server.server_close()
+    with ticket_embed.running():
+        try:
+            config = json.loads((DB_PATH.parent / 'network.json').read_text(encoding='utf-8'))
+            if config.get('enabled'):
+                set_network(True, persist=False, address=config.get('address') or None)
+        except (OSError, ValueError):
+            pass
+        print(f'Character Room is running at {url}', flush=True)
+        if args.open:
+            webbrowser.open(url)
+        try:
+            server.serve_forever()
+        except KeyboardInterrupt:
+            pass
+        finally:
+            set_network(False, persist=False)
+            server.server_close()
 
 if __name__ == '__main__':
     main()
