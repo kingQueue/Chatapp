@@ -11,7 +11,7 @@ Start Character Room and install FreeCAD. If Ollama does not already have the ba
 .venv\Scripts\python.exe configure_freecad.py --smoke
 ```
 
-The smoke test asks the actual character to make a spacer with a through-hole and checks for the produced FreeCAD file. Open the preconfigured **FreeCAD Workbench** conversation for future requests. The conversation’s files are under `freecad-project/chat/`. Ticket jobs use their own `freecad-project/<ticket-id>/` folders. With `TICKETS_DISPATCH=true` and `cad_agent` enabled, assign a design ticket and move it to Ready.
+The smoke test asks the actual character to make a spacer with a through-hole and checks for the produced FreeCAD file. Open the preconfigured **FreeCAD Workbench** conversation for future requests. Its project directory defaults to a folder beside the checkout. Use `--project` to choose a different location outside the app directory. Ticket jobs use their own `freecad-project/<ticket-id>/` folders. With `TICKETS_DISPATCH=true` and `cad_agent` enabled, assign a design ticket and move it to Ready.
 
 ## Prepare and validate training
 

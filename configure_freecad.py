@@ -27,7 +27,7 @@ def api(origin, path, data=None):
         return json.load(response)
 
 
-def configure(origin, model):
+def configure(origin, model, project_override=None):
     state = api(origin, "/api/state")
     registry = api(origin, "/api/tools")["tools"]
     available = api(origin, "/api/models")["models"]
@@ -45,8 +45,6 @@ def configure(origin, model):
                                   "location": location, "enabled": True})
     elif not registered["enabled"]:
         raise ValueError("Enable the existing FreeCAD Workbench tool in Character Room settings.")
-    project = (ROOT / "freecad-project" / "chat").resolve()
-    project.mkdir(parents=True, exist_ok=True)
     character = next((entry for entry in state["characters"] if entry["name"] == CHARACTER), None)
     if character:
         character_id = character["id"]
@@ -63,6 +61,9 @@ def configure(origin, model):
         })["id"]
     existing = next((entry for entry in state["chats"]
                      if entry["character_id"] == character_id and entry["title"] == CHAT), None)
+    previous_project = existing.get("project_dir") if existing else None
+    project = Path(project_override or previous_project or (ROOT.parent / f"{ROOT.name}-freecad-project")).resolve()
+    project.mkdir(parents=True, exist_ok=True)
     chat_id = existing["id"] if existing else api(origin, "/api/chats", {"character_id": character_id})["id"]
     api(origin, f"/api/chats/{chat_id}", {"title": CHAT, "project_dir": str(project)})
     return chat_id, project
@@ -92,13 +93,14 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--origin", default="http://127.0.0.1:8765")
     parser.add_argument("--model", default=BASE_MODEL)
+    parser.add_argument("--project", type=Path, help="Dedicated folder outside the Character Room installation.")
     parser.add_argument("--smoke", action="store_true", help="Ask the configured character to make a spacer.")
     args = parser.parse_args()
     target = urlsplit(args.origin)
     if target.scheme != "http" or target.hostname not in {"127.0.0.1", "localhost"} or target.path not in {"", "/"}:
         parser.error("Use the local Character Room address.")
     try:
-        chat, project = configure(args.origin.rstrip("/"), args.model)
+        chat, project = configure(args.origin.rstrip("/"), args.model, args.project)
         print(f"{CHARACTER} is ready in the {CHAT} conversation ({args.model}).", flush=True)
         if args.smoke:
             smoke(args.origin.rstrip("/"), chat, project)
