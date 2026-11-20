@@ -87,12 +87,6 @@ class Worker:
                 handoff, run = await self.complete(client, job, ticket, ticket["assignee"], kind, {
                     "ticket": ticket, "prior_review": (self.store.run(work_run)["reviewer_verdict"] if work_run else None),
                 }, Handoff, lambda text: Handoff.model_validate(parse_json(text)))
-                if freecad.NAME in self.settings.agents[ticket["assignee"]].allowed_mcp_tools:
-                    produced = {file for item in run["tool_results"]
-                                if isinstance(item["result"], dict) and item["result"].get("shape_validated") is True
-                                for file in item["result"]["files"]}
-                    if not produced or set(handoff.files_produced) != produced:
-                        raise Conflict("CAD handoff must list the files returned by a successful FreeCAD run.")
                 self.store.mutate_job(key, job, work_run=run["id"], outputs=handoff.files_produced)
                 if "orchestrator" in self.enabled:
                     await self.decide(client, job, ticket, "handoff", handoff=handoff.model_dump())
@@ -155,8 +149,13 @@ class Worker:
 
     async def complete(self, client, job, ticket, name, kind, context, schema, validate, retries=0):
         key, agent = ticket["id"], self.settings.agents[name]
+        cad_work = kind == "work" and freecad.NAME in agent.allowed_mcp_tools
+        instructions = agent.system_prompt
+        if cad_work:
+            instructions += (f"\nCall {freecad.NAME} before writing the final handoff. "
+                             "Wait for the tool to report valid model files.")
         messages = [
-            {"role": "system", "content": agent.system_prompt + "\nReturn only JSON matching this schema after any tool use:\n"
+            {"role": "system", "content": instructions + "\nReturn only JSON matching this schema after any tool use:\n"
              + encode(schema.model_json_schema())},
             {"role": "user", "content": encode(context)},
         ]
@@ -167,6 +166,7 @@ class Worker:
                   "input_tokens": 0, "output_tokens": 0, "cost_usd": 0, "estimated_usage": False}
         self.store.save_run(key, record)
         tools = Tools(client, self.settings.root, agent, self.store, key, job)
+        cad_retry = cad_work
         try:
             functions = [] if name == "orchestrator" else await tools.describe()
             record["tools"] = functions
@@ -229,6 +229,26 @@ class Worker:
                     messages.append({"role": "user", "content": "Invalid response. Return only corrected JSON. "
                                      + str(error)[:1500]})
                     continue
+                if cad_work:
+                    cad_calls = {call["id"] for call in record["tool_calls"]
+                                 if call["function"]["name"] == freecad.NAME}
+                    produced = list(dict.fromkeys(
+                        file for item in record["tool_results"]
+                        if item["tool_call_id"] in cad_calls and isinstance(item["result"], dict)
+                        and item["result"].get("shape_validated") is True
+                        for file in item["result"]["files"]
+                    ))
+                    if not produced and cad_retry:
+                        cad_retry = False
+                        record.setdefault("retry_messages", []).extend([len(messages) - 1, len(messages)])
+                        messages.append({"role": "user", "content": "No successful FreeCAD execution was recorded. "
+                                         f"Use {freecad.NAME} now to create the actual model files."})
+                        continue
+                    if not produced:
+                        raise Conflict("No successful FreeCAD call was recorded for this handoff.")
+                    if result.files_produced != produced:
+                        result = result.model_copy(update={"files_produced": produced})
+                        record["normalized_training_answer"] = encode(result.model_dump())
                 if kind == "review":
                     record["reviewer_verdict"] = result.model_dump()
                 record.update(status="completed", result=result.model_dump())

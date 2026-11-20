@@ -404,8 +404,10 @@ class Store:
                                       (record["id"],)).fetchone()
                 if not rejected and (record.get("reviewer_verdict") or {}).get("verdict") == "pass":
                     discard = set(record.get("retry_messages", []))
-                    yield {"messages": [message for index, message in enumerate(record["messages"])
-                                        if index not in discard], "tools": record["tools"]}
+                    messages = [message for index, message in enumerate(record["messages"]) if index not in discard]
+                    if "normalized_training_answer" in record:
+                        messages[-1] = {"role": "assistant", "content": record["normalized_training_answer"]}
+                    yield {"messages": messages, "tools": record["tools"]}
 
     def approval(self, key, job, call):
         with self.transaction() as db:

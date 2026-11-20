@@ -1,11 +1,14 @@
 import asyncio
+from dataclasses import replace
 import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import httpx
 
+from ticketing import freecad
 from ticketing.config import Agent, MCP, MCPTool, Settings
 from ticketing.schema import TicketFields
 from ticketing.store import Store, encode
@@ -140,3 +143,33 @@ class DispatcherTests(unittest.IsolatedAsyncioTestCase):
                 else:
                     await invocation
                     self.assertEqual(remote_calls, [{"name": "remove_fixture", "arguments": {"name": decision}}])
+
+    async def test_cad_handoff_requires_tool_success_and_uses_verified_paths(self):
+        agent = self.worker.settings.agents["research_agent"].model_copy(update={
+            "allowed_mcp_tools": [freecad.NAME], "allowed_file_paths": ["freecad-project"],
+        })
+        settings = replace(self.worker.settings, agents={"cad_agent": agent})
+        worker = Worker(settings, self.store)
+        key = self.store.create(TicketFields(title="A block", type="design", assignee="cad_agent"))["id"]
+        self.store.transition(key, "ready", "Ready for CAD")
+        handoff = {"content": encode({"work_done": "Modelled", "files_produced": ["block.FCStd"],
+                                      "unresolved_issues": [], "next_agent_needs": "Inspect exports"})}
+        args = {"output": "models/block", "shapes": [{"type": "box", "length": 3, "width": 4, "height": 5}]}
+        responses = iter([
+            handoff,
+            {"content": None, "tool_calls": [{"id": "cad-1", "function": {
+                "name": freecad.NAME, "arguments": encode(args),
+            }}]},
+            handoff,
+        ])
+        files = ["models/block.FCStd", "models/block.step", "models/block.stl", "models/block.cad.json"]
+        with patch.object(freecad, "generate", return_value={"files": files, "shape_validated": True}):
+            transport = httpx.MockTransport(lambda request: self.reply(next(responses)))
+            async with httpx.AsyncClient(transport=transport) as client:
+                await worker.dispatch(client, *self.store.claim(worker.enabled))
+        ticket = self.store.get(key)
+        self.assertEqual(ticket["status"], "review")
+        self.assertEqual(ticket["outputs"], [f"freecad-project/{key}/{path}" for path in files])
+        run, = self.store.runs(key)
+        self.assertEqual(run["messages"][-1], {"role": "assistant", **handoff})
+        self.assertEqual(run["result"]["files_produced"], ticket["outputs"])
