@@ -60,6 +60,7 @@ class Settings:
     dispatch: bool
     soup: str
     agents: dict[str, Agent]
+    soup_wsl_distro: str | None = None
 
 
 def load_settings(root=ROOT):
@@ -73,4 +74,5 @@ def load_settings(root=ROOT):
             url_validator.validate_python(agent.mcp.endpoint)
     return Settings(root, os.getenv("TICKETS_TOKEN", ""),
                     os.getenv("TICKETS_DISPATCH", "").lower() in {"1", "true", "yes"},
-                    os.getenv("SOUP_EXECUTABLE", "soup"), config.agents)
+                    os.getenv("SOUP_EXECUTABLE", "soup"), config.agents,
+                    os.getenv("SOUP_WSL_DISTRO") or None)

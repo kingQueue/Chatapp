@@ -13,6 +13,7 @@ import yaml
 
 from .state import Conflict, Missing
 from .store import encode, now
+from .wsl_soup import CANCEL
 
 DATASET = re.compile(r"[a-z][a-z0-9_-]{0,63}--[a-f0-9]{32}\.jsonl\Z")
 ACTIVE = {"queued", "initializing", "validating", "training", "cancelling"}
@@ -54,6 +55,8 @@ class Trainer:
             job = json.loads(file.read_text(encoding="utf-8"))
             self.jobs[job["id"]] = job
             if job["status"] in ACTIVE:
+                if job.get("runtime") == "wsl":
+                    (file.parent / CANCEL).touch()
                 self.update(job, "interrupted", "The service restarted.")
 
     def update(self, job, status, error=None):
@@ -83,7 +86,10 @@ class Trainer:
                 part in {".", ".."} for part in base.split("/")):
             raise Conflict("Use a model ID such as Qwen/Qwen2.5-7B-Instruct.")
         configured = self.settings.soup
-        executable = shutil.which(configured)
+        use_wsl = bool(self.settings.soup_wsl_distro)
+        if use_wsl and (os.name != "nt" or not configured.startswith("/") or not shutil.which("wsl.exe")):
+            raise Conflict("WSL training requires Windows, wsl.exe and an absolute Linux SOUP_EXECUTABLE.")
+        executable = configured if use_wsl else shutil.which(configured)
         if not executable and configured == "soup" and os.name == "nt":
             import sys
             candidate = Path(sys.executable).with_name("soup.exe")
@@ -97,7 +103,8 @@ class Trainer:
         job_dir.mkdir()
         (job_dir / "output.log").touch()
         job = {"id": identifier, "agent": agent, "base_model": base, "dataset": dataset, "validate_only": validate_only,
-               "created": now(), "model_path": output.relative_to(self.settings.root).as_posix()}
+               "created": now(), "model_path": output.relative_to(self.settings.root).as_posix(),
+               "runtime": "wsl" if use_wsl else "native"}
         self.update(job, "queued")
         self.jobs[identifier] = job
         self.cancel_requested = False
@@ -116,14 +123,20 @@ class Trainer:
         env.update(PYTHONUNBUFFERED="1", PYTHONIOENCODING="utf-8", NO_COLOR="1")
         options = ({"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt"
                    else {"start_new_session": True})
+        command = [executable, *args]
+        if self.settings.soup_wsl_distro:
+            wrapper = job_dir / ".soup-wsl.py"
+            shutil.copyfile(Path(__file__).with_name("wsl_soup.py"), wrapper)
+            command = ["wsl.exe", "--distribution", self.settings.soup_wsl_distro, "--cd", str(job_dir),
+                       "--exec", "/usr/bin/python3", wrapper.name, *command]
         with (job_dir / "output.log").open("ab", buffering=0) as log:
             log.write(("$ soup " + " ".join(args) + "\n").encode("utf-8"))
             self.process = await asyncio.create_subprocess_exec(
-                executable, *args, cwd=job_dir, env=env,
+                *command, cwd=job_dir, env=env,
                 stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, **options)
             try:
                 if self.cancel_requested:
-                    await self.stop_process(self.process)
+                    await self.stop_job_process(job_dir, self.process)
                 code = await self.process.wait()
                 if code and not self.cancel_requested:
                     raise Conflict(f"Soup {args[0]} exited with code {code}. See the training log.")
@@ -147,7 +160,8 @@ class Trainer:
             if profile.is_file():
                 merge(config, yaml.safe_load(profile.read_text(encoding="utf-8")))
             shutil.copyfile(self.settings.root / "datasets" / job["dataset"], job_dir / "dataset.jsonl")
-            config.update(base=job["base_model"], output=str(output))
+            relative_output = Path(os.path.relpath(output, job_dir)).as_posix()
+            config.update(base=job["base_model"], output=relative_output)
             config["data"].update(train="./dataset.jsonl", format="tool-calling")
             with (job_dir / "dataset.jsonl").open(encoding="utf-8") as sample:
                 if sum(1 for _ in zip(range(10), sample)) < 10:
@@ -190,6 +204,16 @@ class Trainer:
             with suppress(ProcessLookupError):
                 os.killpg(process.pid, signal.SIGKILL)
 
+    async def stop_job_process(self, job_dir, process):
+        if self.settings.soup_wsl_distro:
+            (job_dir / CANCEL).touch()
+            try:
+                await asyncio.wait_for(process.wait(), timeout=15)
+                return
+            except TimeoutError:
+                pass
+        await self.stop_process(process)
+
     async def cancel(self, identifier):
         job = self.get(identifier)
         if job["status"] not in ACTIVE:
@@ -197,7 +221,7 @@ class Trainer:
         self.cancel_requested = True
         self.update(job, "cancelling")
         if self.process:
-            await self.stop_process(self.process)
+            await self.stop_job_process(self.directory / identifier, self.process)
         return job
 
     async def shutdown(self):
